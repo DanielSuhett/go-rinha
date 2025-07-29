@@ -72,5 +72,4 @@ func (h *HTTPClient) GetHealth(url string, timeout time.Duration) (int, []byte, 
 }
 
 func (h *HTTPClient) Close() {
-	// fasthttp client doesn't need explicit closing
 }
