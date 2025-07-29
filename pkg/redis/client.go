@@ -23,7 +23,7 @@ func NewClient(addr string) *Client {
 		DialTimeout:     5 * time.Second,
 		ReadTimeout:     3 * time.Second,
 		WriteTimeout:    3 * time.Second,
-		PoolSize:        20,
+		PoolSize:        30,
 		MinIdleConns:    5,
 		MaxIdleConns:    10,
 		ConnMaxIdleTime: 30 * time.Second,
@@ -100,4 +100,3 @@ func (c *Client) Subscribe(ctx context.Context, channels ...string) *redis.PubSu
 func (c *Client) Close() error {
 	return c.rdb.Close()
 }
-

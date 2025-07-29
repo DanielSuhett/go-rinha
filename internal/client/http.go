@@ -16,10 +16,10 @@ type HTTPClient struct {
 func NewHTTPClient() *HTTPClient {
 	return &HTTPClient{
 		client: &fasthttp.Client{
-			ReadTimeout:         1 * time.Second,
-			WriteTimeout:        1 * time.Second,
-			MaxConnsPerHost:     100,
-			MaxIdleConnDuration: 10 * time.Second,
+			ReadTimeout:         500 * time.Millisecond,
+			WriteTimeout:        500 * time.Millisecond,
+			MaxConnsPerHost:     50,
+			MaxIdleConnDuration: 5 * time.Second,
 		},
 	}
 }
@@ -40,7 +40,7 @@ func (h *HTTPClient) PostPayment(url string, payment *types.PaymentRequest) (int
 	req.Header.SetContentType("application/json")
 	req.SetBody(jsonData)
 
-	err = h.client.DoTimeout(req, resp, 5*time.Second)
+	err = h.client.DoTimeout(req, resp, 2*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("request failed: %w", err)
 	}

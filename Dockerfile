@@ -22,4 +22,7 @@ USER gouser
 
 EXPOSE 8080
 
+ENV GOGC=100
+ENV GOMEMLIMIT=140MiB
+
 CMD ["./main"]

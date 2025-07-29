@@ -75,6 +75,16 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 			log.Printf("Failed to save payment: %v", err)
 			return err
 		}
+	} else {
+		log.Printf("Payment failed with status code %d for processor %s", statusCode, processor)
+		color := circuitBreaker.SignalFailure(processor)
+		
+		if color == types.ColorRed {
+			queueService.Requeue(data)
+			return nil
+		}
+		
+		return fmt.Errorf("payment failed with status %d", statusCode)
 	}
 
 	return nil

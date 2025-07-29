@@ -27,9 +27,9 @@ func LoadConfig() (*Config, error) {
 		RedisPort:                getEnvAsInt("REDIS_PORT", 6380),
 		ProcessorDefaultURL:      getEnv("PROCESSOR_DEFAULT_URL", ""),
 		ProcessorFallbackURL:     getEnv("PROCESSOR_FALLBACK_URL", ""),
-		PollingInterval:          getEnvAsInt("POOLING_INTERVAL", 1000),
+		PollingInterval:          getEnvAsInt("POOLING_INTERVAL", 2000),
 		HealthTimeout:            getEnvAsInt("HEALTH_TIMEOUT", 500),
-		HealthInterval:           getEnvAsInt("HEALTH_INTERVAL", 5000),
+		HealthInterval:           getEnvAsInt("HEALTH_INTERVAL", 3000),
 		LatencyDiffToUseFallback: getEnvAsInt("LATENCY_DIFF_TO_USE_FALLBACK", 5000),
 	}
 

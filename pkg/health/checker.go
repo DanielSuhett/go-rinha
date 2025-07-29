@@ -14,19 +14,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const colorDebounceMsec = 3000
-
 type Checker struct {
-	httpClient      *client.HTTPClient
-	redisClient     *redisClient.Client
-	config          *config.Config
-	currentColor    atomic.Value
-	ctx             context.Context
-	cancel          context.CancelFunc
-	lastColorChange atomic.Int64
-	recoveryTicker  *time.Ticker
-	pubSub          *redis.PubSub
-	lastPublished   atomic.Value
+	httpClient     *client.HTTPClient
+	redisClient    *redisClient.Client
+	config         *config.Config
+	currentColor   atomic.Value
+	ctx            context.Context
+	cancel         context.CancelFunc
+	recoveryTicker *time.Ticker
+	pubSub         *redis.PubSub
+	lastPublished  atomic.Value
 }
 
 func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, config *config.Config) *Checker {
@@ -41,7 +38,6 @@ func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, 
 	}
 
 	checker.currentColor.Store(types.ColorGreen)
-	checker.lastColorChange.Store(0)
 	checker.lastPublished.Store(types.CircuitBreakerColor(""))
 
 	return checker
@@ -49,9 +45,6 @@ func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, 
 
 func (c *Checker) Start() {
 	go c.subscribeToColorChanges()
-	if c.config.IsMaster() {
-		go c.healthCheckWorker()
-	}
 }
 
 func (c *Checker) Stop() {
@@ -70,54 +63,43 @@ func (c *Checker) GetCurrentColor() types.CircuitBreakerColor {
 
 func (c *Checker) SignalFailure(processor types.Processor) types.CircuitBreakerColor {
 	log.Printf("Signal failure for %s", processor)
-	otherProcessor := types.ProcessorFallback
-	if processor == types.ProcessorFallback {
-		otherProcessor = types.ProcessorDefault
+
+	defaultHealth := c.checkHealth(types.ProcessorDefault)
+	fallbackHealth := c.checkHealth(types.ProcessorFallback)
+
+	processors := map[string]*types.ProcessorHealth{
+		"default":  defaultHealth,
+		"fallback": fallbackHealth,
 	}
 
-	health := c.checkHealth(otherProcessor)
-	if health != nil && !health.Failing {
-		var newColor types.CircuitBreakerColor
-		if otherProcessor == types.ProcessorFallback {
-			newColor = types.ColorYellow
-		} else {
-			newColor = types.ColorGreen
-		}
-		c.setColor(newColor)
-	} else {
-		c.setColor(types.ColorRed)
+	if defaultHealth == nil {
+		processors["default"] = &types.ProcessorHealth{Failing: true, MinResponseTime: 0}
+	}
+	if fallbackHealth == nil {
+		processors["fallback"] = &types.ProcessorHealth{Failing: true, MinResponseTime: 0}
+	}
+
+	newColor := c.calculateColor(processors)
+	c.setColor(newColor)
+
+	if newColor == types.ColorRed && c.config.IsMaster() {
+		c.startRecoveryMonitoring()
 	}
 
 	return c.GetCurrentColor()
 }
 
 func (c *Checker) setColor(color types.CircuitBreakerColor) {
-	now := time.Now().UnixMilli()
-
-	log.Printf("Setting color to %s", color)
 	currentColor := c.currentColor.Load().(types.CircuitBreakerColor)
 	if currentColor != color {
-		lastChange := c.lastColorChange.Load()
-		if color == types.ColorRed || now-lastChange >= colorDebounceMsec {
-			c.currentColor.Store(color)
-			c.lastColorChange.Store(now)
-			if c.config.IsMaster() {
-				c.publishColorChange(color)
+		log.Printf("Setting color to %s", color)
+		c.currentColor.Store(color)
+		if c.config.IsMaster() {
+			c.publishColorChange(color)
+			if currentColor == types.ColorRed && color != types.ColorRed {
+				c.recoveryTicker.Stop()
+				c.recoveryTicker = nil
 			}
-		}
-	}
-}
-
-func (c *Checker) healthCheckWorker() {
-	ticker := time.NewTicker(time.Duration(c.config.HealthInterval) * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
-			c.performHealthChecks()
 		}
 	}
 }
@@ -157,11 +139,6 @@ func (c *Checker) startRecoveryMonitoring() {
 	}()
 }
 
-func (c *Checker) performHealthChecks() {
-	recoveredColor := c.checkForRecovery()
-	c.setColor(recoveredColor)
-}
-
 func (c *Checker) checkForRecovery() types.CircuitBreakerColor {
 	defaultHealth := c.checkHealth(types.ProcessorDefault)
 	fallbackHealth := c.checkHealth(types.ProcessorFallback)
@@ -194,6 +171,7 @@ func (c *Checker) checkHealth(processor types.Processor) *types.ProcessorHealth 
 	}
 
 	if statusCode == 429 {
+		log.Printf("429 response from %s", processor)
 		return &types.ProcessorHealth{MinResponseTime: 0, Failing: false}
 	}
 
@@ -250,7 +228,6 @@ func (c *Checker) subscribeToColorChanges() {
 			color := types.CircuitBreakerColor(msg.Payload)
 			log.Printf("Received color change: %s", color)
 			c.currentColor.Store(color)
-			c.lastColorChange.Store(time.Now().UnixMilli())
 		}
 	}
 }
@@ -260,12 +237,12 @@ func (c *Checker) publishColorChange(color types.CircuitBreakerColor) {
 	if lastPublished == color {
 		return
 	}
-	
+
 	if err := c.redisClient.Publish(c.ctx, types.ChannelCircuitColor, string(color)); err != nil {
 		log.Printf("Failed to publish color change: %v", err)
 		return
 	}
-	
+
 	c.lastPublished.Store(color)
 	log.Printf("Published color change: %s", color)
 }

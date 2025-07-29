@@ -6,6 +6,7 @@ import (
 	"go-rinha/pkg/redis"
 	"log"
 	"math"
+	"sync"
 	"time"
 )
 
@@ -17,44 +18,118 @@ type QueueService struct {
 	paymentProcessor func(string) error
 	isProcessing     bool
 	backoffDelay     time.Duration
+
+	workerChan  chan string
+	workerWg    sync.WaitGroup
+	workerCount int
+
+	requeueChan  chan string
+	requeueWg    sync.WaitGroup
+	requeueCount int
 }
 
 const (
-	minBackoff        = 100 * time.Millisecond
+	minBackoff        = 500 * time.Millisecond
 	maxBackoff        = 1000 * time.Millisecond
-	backoffMultiplier = 1.1
+	backoffMultiplier = 1.2
+	workerPoolSize    = 8
+	workerChanBuffer  = 400
+	requeueWorkerSize = 24
+	requeueChanBuffer = 3000
 )
 
 func NewQueueService(redisClient *redis.Client, config *config.Config) *QueueService {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &QueueService{
+	q := &QueueService{
 		redisClient:  redisClient,
 		config:       config,
 		ctx:          ctx,
 		cancel:       cancel,
 		backoffDelay: minBackoff,
+		workerChan:   make(chan string, workerChanBuffer),
+		workerCount:  workerPoolSize,
+		requeueChan:  make(chan string, requeueChanBuffer),
+		requeueCount: requeueWorkerSize,
 	}
+
+	q.startWorkers()
+	q.startRequeueWorkers()
+	return q
 }
 
 func (q *QueueService) SetPaymentProcessor(processor func(string) error) {
 	q.paymentProcessor = processor
 }
 
-func (q *QueueService) Add(item string) {
-	go func() {
-		if err := q.redisClient.LPush(q.ctx, q.config.GetRedisKeyPrefix(), item); err != nil {
-			log.Printf("Failed to add item to queue: %v", err)
+func (q *QueueService) startWorkers() {
+	for i := 0; i < q.workerCount; i++ {
+		q.workerWg.Add(1)
+		go q.worker()
+	}
+}
+
+func (q *QueueService) startRequeueWorkers() {
+	for i := 0; i < q.requeueCount; i++ {
+		q.requeueWg.Add(1)
+		go q.requeueWorker()
+	}
+}
+
+func (q *QueueService) worker() {
+	defer q.workerWg.Done()
+
+	for {
+		select {
+		case <-q.ctx.Done():
+			return
+		case item := <-q.workerChan:
+			if err := q.redisClient.LPush(q.ctx, q.config.GetRedisKeyPrefix(), item); err != nil {
+				log.Printf("Failed to push item to Redis: %v", err)
+			}
 		}
-	}()
+	}
+}
+
+func (q *QueueService) requeueWorker() {
+	defer q.requeueWg.Done()
+
+	for {
+		select {
+		case <-q.ctx.Done():
+			return
+		case item := <-q.requeueChan:
+			if err := q.redisClient.LPush(q.ctx, q.config.GetRedisKeyPrefix(), item); err != nil {
+				log.Printf("Failed to requeue item to Redis: %v", err)
+			}
+		}
+	}
+}
+
+func (q *QueueService) Add(item string) {
+	select {
+	case q.workerChan <- item:
+	case <-q.ctx.Done():
+		log.Printf("Queue service stopped, cannot add item")
+	default:
+		log.Printf("Worker channel full, attempting direct Redis push")
+		if err := q.redisClient.LPush(q.ctx, q.config.GetRedisKeyPrefix(), item); err != nil {
+			log.Printf("Failed to push item to Redis: %v", err)
+		}
+	}
 }
 
 func (q *QueueService) Requeue(item string) {
-	go func() {
+	select {
+	case q.requeueChan <- item:
+	case <-q.ctx.Done():
+		log.Printf("Queue service stopped, cannot requeue item")
+	default:
+		log.Printf("Requeue channel full, attempting direct Redis push")
 		if err := q.redisClient.LPush(q.ctx, q.config.GetRedisKeyPrefix(), item); err != nil {
-			log.Printf("Failed to requeue item: %v", err)
+			log.Printf("Failed to requeue item to Redis: %v", err)
 		}
-	}()
+	}
 }
 
 func (q *QueueService) Start() {
@@ -65,6 +140,12 @@ func (q *QueueService) Start() {
 func (q *QueueService) Stop() {
 	q.isProcessing = false
 	q.cancel()
+
+	close(q.workerChan)
+	q.workerWg.Wait()
+
+	close(q.requeueChan)
+	q.requeueWg.Wait()
 }
 
 func (q *QueueService) startProcessing() {
@@ -79,7 +160,7 @@ func (q *QueueService) startProcessing() {
 }
 
 func (q *QueueService) processBatch() {
-	batch, err := q.redisClient.Dequeue(q.ctx, q.config.GetRedisKeyPrefix(), 10)
+	batch, err := q.redisClient.Dequeue(q.ctx, q.config.GetRedisKeyPrefix(), 25)
 	if err != nil {
 		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
 		log.Printf("Failed to process batch: %v", err)
@@ -90,7 +171,6 @@ func (q *QueueService) processBatch() {
 		q.backoffDelay = minBackoff
 		q.processItems(batch)
 	} else {
-		log.Printf("No items in batch")
 		q.exponentialBackoff()
 	}
 }
@@ -100,6 +180,7 @@ func (q *QueueService) processItems(items []string) {
 		if q.paymentProcessor != nil {
 			if err := q.paymentProcessor(item); err != nil {
 				log.Printf("Payment processing error: %v", err)
+				q.Requeue(item)
 			}
 		}
 	}
@@ -112,4 +193,3 @@ func (q *QueueService) exponentialBackoff() {
 		float64(maxBackoff),
 	))
 }
-
