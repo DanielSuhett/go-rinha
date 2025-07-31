@@ -17,6 +17,11 @@ type Config struct {
 	HealthTimeout            int    `validate:"required"`
 	HealthInterval           int    `validate:"required"`
 	LatencyDiffToUseFallback int    `validate:"required"`
+	BatchSize                int    `validate:"required"`
+	WorkerPoolSize           int    `validate:"required"`
+	RequeuePoolSize          int    `validate:"required"`
+	WorkerChanBuffer         int    `validate:"required"`
+	RequeueChanBuffer        int    `validate:"required"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -31,6 +36,11 @@ func LoadConfig() (*Config, error) {
 		HealthTimeout:            getEnvAsInt("HEALTH_TIMEOUT", 500),
 		HealthInterval:           getEnvAsInt("HEALTH_INTERVAL", 3000),
 		LatencyDiffToUseFallback: getEnvAsInt("LATENCY_DIFF_TO_USE_FALLBACK", 5000),
+		BatchSize:                getEnvAsInt("BATCH_SIZE", 50),
+		WorkerPoolSize:           getEnvAsInt("WORKER_POOL_SIZE", 8),
+		RequeuePoolSize:          getEnvAsInt("REQUEUE_POOL_SIZE", 8),
+		WorkerChanBuffer:         getEnvAsInt("WORKER_CHAN_BUFFER", 400),
+		RequeueChanBuffer:        getEnvAsInt("REQUEUE_CHAN_BUFFER", 1000),
 	}
 
 	if err := ValidateConfig(config); err != nil {
@@ -89,4 +99,3 @@ func getEnvAsInt(key string, defaultValue int) int {
 	}
 	return defaultValue
 }
-

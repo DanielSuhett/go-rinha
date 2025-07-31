@@ -5,7 +5,6 @@ import (
 	"go-rinha/internal/config"
 	"go-rinha/pkg/redis"
 	"log"
-	"math"
 	"sync"
 	"time"
 )
@@ -17,7 +16,6 @@ type QueueService struct {
 	cancel           context.CancelFunc
 	paymentProcessor func(string) error
 	isProcessing     bool
-	backoffDelay     time.Duration
 
 	workerChan  chan string
 	workerWg    sync.WaitGroup
@@ -28,16 +26,6 @@ type QueueService struct {
 	requeueCount int
 }
 
-const (
-	minBackoff        = 500 * time.Millisecond
-	maxBackoff        = 1000 * time.Millisecond
-	backoffMultiplier = 1.2
-	workerPoolSize    = 8
-	workerChanBuffer  = 400
-	requeueWorkerSize = 24
-	requeueChanBuffer = 3000
-)
-
 func NewQueueService(redisClient *redis.Client, config *config.Config) *QueueService {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -46,11 +34,10 @@ func NewQueueService(redisClient *redis.Client, config *config.Config) *QueueSer
 		config:       config,
 		ctx:          ctx,
 		cancel:       cancel,
-		backoffDelay: minBackoff,
-		workerChan:   make(chan string, workerChanBuffer),
-		workerCount:  workerPoolSize,
-		requeueChan:  make(chan string, requeueChanBuffer),
-		requeueCount: requeueWorkerSize,
+		workerChan:   make(chan string, config.WorkerChanBuffer),
+		workerCount:  config.WorkerPoolSize,
+		requeueChan:  make(chan string, config.RequeueChanBuffer),
+		requeueCount: config.RequeuePoolSize,
 	}
 
 	q.startWorkers()
@@ -160,7 +147,7 @@ func (q *QueueService) startProcessing() {
 }
 
 func (q *QueueService) processBatch() {
-	batch, err := q.redisClient.Dequeue(q.ctx, q.config.GetRedisKeyPrefix(), 25)
+	batch, err := q.redisClient.Dequeue(q.ctx, q.config.GetRedisKeyPrefix(), q.config.BatchSize)
 	if err != nil {
 		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
 		log.Printf("Failed to process batch: %v", err)
@@ -168,10 +155,7 @@ func (q *QueueService) processBatch() {
 	}
 
 	if len(batch) > 0 {
-		q.backoffDelay = minBackoff
 		q.processItems(batch)
-	} else {
-		q.exponentialBackoff()
 	}
 }
 
@@ -184,12 +168,4 @@ func (q *QueueService) processItems(items []string) {
 			}
 		}
 	}
-}
-
-func (q *QueueService) exponentialBackoff() {
-	time.Sleep(q.backoffDelay)
-	q.backoffDelay = time.Duration(math.Min(
-		float64(q.backoffDelay)*backoffMultiplier,
-		float64(maxBackoff),
-	))
 }

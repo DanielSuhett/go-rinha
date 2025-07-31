@@ -15,9 +15,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
-          memory: "35MB"
-
+          cpus: "0.20"
+          memory: "40MB"
   api1:
     build:
       context: .
@@ -34,6 +33,12 @@ services:
       - HEALTH_TIMEOUT=1000
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
+      - BATCH_SIZE=25
+      - WORKER_POOL_SIZE=2
+      - REQUEUE_POOL_SIZE=2
+      - WORKER_CHAN_BUFFER=400
+      - REQUEUE_CHAN_BUFFER=3000
+      - GOGC=1000
     networks:
       - backend
       - payment-processor
@@ -43,9 +48,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.65"
-          memory: "150MB"
-
+          cpus: "0.60"
+          memory: "130MB"
   api2:
     build:
       context: .
@@ -62,6 +66,12 @@ services:
       - HEALTH_TIMEOUT=1000
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
+      - BATCH_SIZE=25
+      - WORKER_POOL_SIZE=2
+      - REQUEUE_POOL_SIZE=2
+      - WORKER_CHAN_BUFFER=400
+      - REQUEUE_CHAN_BUFFER=3000
+      - GOGC=1000
     networks:
       - backend
       - payment-processor
@@ -71,9 +81,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.65"
-          memory: "150MB"
-
+          cpus: "0.50"
+          memory: "130MB"
   redis:
     image: redis:7.2-alpine
     container_name: go-rinha-redis
@@ -90,7 +99,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.20"
           memory: "50MB"
 
 networks:

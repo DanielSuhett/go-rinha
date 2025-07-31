@@ -16,6 +16,7 @@ import (
 	redisClient "go-rinha/pkg/redis"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/valyala/fasthttp"
 )
 
 type PaymentRepository struct {
@@ -51,23 +52,17 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 	}
 
 	statusCode, err := r.httpClient.PostPayment(url, payment)
+
+	if err != nil && err == fasthttp.ErrTimeout {
+		log.Printf("Timeout error with processor: %v", err)
+		queueService.Requeue(data)
+		return nil
+	}
+
 	if err != nil {
-		color := circuitBreaker.SignalFailure(processor)
-
-		if color == types.ColorRed {
-			queueService.Requeue(data)
-			return nil
-		}
-
-		if color == types.ColorYellow {
-			processor = types.ProcessorFallback
-		}
-
-		if color == types.ColorGreen {
-			processor = types.ProcessorDefault
-		}
-
-		return r.Send(processor, data, circuitBreaker, queueService)
+		circuitBreaker.SignalFailure(processor)
+		queueService.Requeue(data)
+		return nil
 	}
 
 	if statusCode == 200 || statusCode == 201 {
@@ -76,15 +71,9 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 			return err
 		}
 	} else {
-		log.Printf("Payment failed with status code %d for processor %s", statusCode, processor)
-		color := circuitBreaker.SignalFailure(processor)
-		
-		if color == types.ColorRed {
-			queueService.Requeue(data)
-			return nil
-		}
-		
-		return fmt.Errorf("payment failed with status %d", statusCode)
+		circuitBreaker.SignalFailure(processor)
+		queueService.Requeue(data)
+		return nil
 	}
 
 	return nil
