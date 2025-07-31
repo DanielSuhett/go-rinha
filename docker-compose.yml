@@ -29,15 +29,15 @@ services:
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
-      - POOLING_INTERVAL=200
+      - POOLING_INTERVAL=500
       - HEALTH_TIMEOUT=1000
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
-      - BATCH_SIZE=25
+      - BATCH_SIZE=100
       - WORKER_POOL_SIZE=2
       - REQUEUE_POOL_SIZE=2
       - WORKER_CHAN_BUFFER=400
-      - REQUEUE_CHAN_BUFFER=3000
+      - REQUEUE_CHAN_BUFFER=6000
       - GOGC=1000
     networks:
       - backend
@@ -62,15 +62,15 @@ services:
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
-      - POOLING_INTERVAL=200
+      - POOLING_INTERVAL=500
       - HEALTH_TIMEOUT=1000
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
-      - BATCH_SIZE=25
+      - BATCH_SIZE=100
       - WORKER_POOL_SIZE=2
       - REQUEUE_POOL_SIZE=2
       - WORKER_CHAN_BUFFER=400
-      - REQUEUE_CHAN_BUFFER=3000
+      - REQUEUE_CHAN_BUFFER=6000
       - GOGC=1000
     networks:
       - backend
