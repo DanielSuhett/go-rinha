@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/valyala/fasthttp"
 	"go-rinha/internal/client"
 	"go-rinha/internal/config"
 	"go-rinha/internal/handler"
@@ -17,6 +16,8 @@ import (
 	"go-rinha/internal/service"
 	"go-rinha/pkg/health"
 	"go-rinha/pkg/redis"
+
+	"github.com/valyala/fasthttp"
 )
 
 func main() {
@@ -35,31 +36,34 @@ func main() {
 	queueService := service.NewQueueService(redisClient, cfg)
 	paymentRepo := repository.NewPaymentRepository(httpClient, redisClient, cfg)
 	paymentService := service.NewPaymentService(circuitBreaker, queueService, paymentRepo)
-	
+
 	queueService.SetPaymentProcessor(paymentService.ProcessPayment)
 
 	paymentHandler := handler.NewPaymentHandler(paymentService, queueService)
 
 	server := &fasthttp.Server{
-		Handler:               setupRoutes(paymentHandler),
-		DisableKeepalive:      false,
-		MaxRequestBodySize:    16 * 1024,
-		ReadTimeout:           5 * time.Second,
-		WriteTimeout:          5 * time.Second,
-		IdleTimeout:           72 * time.Second,
-		MaxConnsPerIP:         0,
-		MaxRequestsPerConn:    0,
-		TCPKeepalive:          true,
-		TCPKeepalivePeriod:    30 * time.Second,
-		ReduceMemoryUsage:     true,
-		GetOnly:               false,
-		DisablePreParseMultipartForm: true,
-		LogAllErrors:          false,
-		SecureErrorLogMessage: false,
+		Handler:                       setupRoutes(paymentHandler),
+		DisableKeepalive:              false,
+		MaxRequestBodySize:            4 * 1024,
+		ReadTimeout:                   100 * time.Millisecond,
+		WriteTimeout:                  100 * time.Millisecond,
+		IdleTimeout:                   10 * time.Second,
+		MaxConnsPerIP:                 0,
+		MaxRequestsPerConn:            0,
+		TCPKeepalive:                  true,
+		TCPKeepalivePeriod:            10 * time.Second,
+		ReduceMemoryUsage:             false,
+		GetOnly:                       false,
+		DisablePreParseMultipartForm:  true,
+		LogAllErrors:                  false,
+		SecureErrorLogMessage:         false,
 		DisableHeaderNamesNormalizing: true,
-		NoDefaultServerHeader: true,
-		NoDefaultDate:         true,
-		NoDefaultContentType:  true,
+		NoDefaultServerHeader:         true,
+		NoDefaultDate:                 true,
+		NoDefaultContentType:          true,
+		ReadBufferSize:                4096,
+		WriteBufferSize:               4096,
+		Concurrency:                   256 * 1024,
 	}
 
 	circuitBreaker.Start()
@@ -67,7 +71,6 @@ func main() {
 
 	go func() {
 		addr := fmt.Sprintf("0.0.0.0:%d", cfg.AppPort)
-		log.Printf("Server starting on %s", addr)
 		if err := server.ListenAndServe(addr); err != nil {
 			log.Fatalf("Server failed to start: %v", err)
 		}
@@ -76,8 +79,6 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-
-	log.Println("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -90,7 +91,6 @@ func main() {
 	}
 
 	redisClient.Close()
-	log.Println("Server exited")
 }
 
 func setupRoutes(paymentHandler *handler.PaymentHandler) fasthttp.RequestHandler {
