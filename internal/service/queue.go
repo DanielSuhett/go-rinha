@@ -94,15 +94,8 @@ func (q *QueueService) requeueWorker() {
 }
 
 func (q *QueueService) Add(item string) {
-	select {
-	case q.workerChan <- item:
-	case <-q.ctx.Done():
-		log.Printf("Queue service stopped, cannot add item")
-	default:
-		log.Printf("Worker channel full, attempting direct Redis push")
-		if err := q.redisClient.LPush(q.ctx, q.config.GetRedisKeyPrefix(), item); err != nil {
-			log.Printf("Failed to push item to Redis: %v", err)
-		}
+	if err := q.redisClient.LPush(q.ctx, q.config.GetRedisKeyPrefix(), item); err != nil {
+		log.Printf("Failed to push item to Redis: %v", err)
 	}
 }
 
