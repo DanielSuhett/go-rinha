@@ -21,8 +21,7 @@ func NewPaymentHandler(paymentService *service.PaymentService, queueService *ser
 }
 
 func (h *PaymentHandler) PostPayments(ctx *fasthttp.RequestCtx) {
-	h.queueService.Add(string(ctx.PostBody()))
-	ctx.SetStatusCode(fasthttp.StatusCreated)
+	h.queueService.Add(ctx.PostBody())
 }
 
 func (h *PaymentHandler) GetPaymentsSummary(ctx *fasthttp.RequestCtx) {

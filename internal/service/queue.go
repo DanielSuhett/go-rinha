@@ -19,7 +19,7 @@ type QueueService struct {
 	isProcessing     bool
 	healthChecker    HealthChecker
 
-	workerChan  chan string
+	workerChan  chan []byte
 	workerWg    sync.WaitGroup
 	workerCount int
 
@@ -40,7 +40,7 @@ func NewQueueService(redisClient *redis.Client, config *config.Config) *QueueSer
 		config:       config,
 		ctx:          ctx,
 		cancel:       cancel,
-		workerChan:   make(chan string, config.WorkerChanBuffer),
+		workerChan:   make(chan []byte, config.WorkerChanBuffer),
 		workerCount:  config.WorkerPoolSize,
 		requeueChan:  make(chan string, config.RequeueChanBuffer),
 		requeueCount: config.RequeuePoolSize,
@@ -103,7 +103,7 @@ func (q *QueueService) requeueWorker() {
 	}
 }
 
-func (q *QueueService) Add(item string) {
+func (q *QueueService) Add(item []byte) {
 	select {
 	case q.workerChan <- item:
 	case <-q.ctx.Done():

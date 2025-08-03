@@ -36,7 +36,7 @@ services:
       - BATCH_SIZE=100
       - WORKER_POOL_SIZE=12
       - REQUEUE_POOL_SIZE=2
-      - WORKER_CHAN_BUFFER=400
+      - WORKER_CHAN_BUFFER=8000
       - REQUEUE_CHAN_BUFFER=6000
     networks:
       - backend
@@ -68,7 +68,7 @@ services:
       - BATCH_SIZE=100
       - WORKER_POOL_SIZE=12
       - REQUEUE_POOL_SIZE=2
-      - WORKER_CHAN_BUFFER=400
+      - WORKER_CHAN_BUFFER=8000
       - REQUEUE_CHAN_BUFFER=6000
     networks:
       - backend
