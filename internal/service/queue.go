@@ -19,14 +19,6 @@ type QueueService struct {
 	paymentProcessor func(string) error
 	isProcessing     bool
 	healthChecker    HealthChecker
-
-	workerChan  chan string
-	workerWg    sync.WaitGroup
-	workerCount int
-
-	requeueChan  chan string
-	requeueWg    sync.WaitGroup
-	requeueCount int
 }
 
 type HealthChecker interface {
@@ -38,18 +30,12 @@ func NewQueueService(config *config.Config) *QueueService {
 
 	queueSize := 1024 * 16
 	q := &QueueService{
-		fastQueue:    NewFastQueue(queueSize),
-		config:       config,
-		ctx:          ctx,
-		cancel:       cancel,
-		workerChan:   make(chan string, config.WorkerChanBuffer),
-		workerCount:  config.WorkerPoolSize,
-		requeueChan:  make(chan string, config.RequeueChanBuffer),
-		requeueCount: config.RequeuePoolSize,
+		fastQueue: NewFastQueue(queueSize),
+		config:    config,
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 
-	q.startWorkers()
-	q.startRequeueWorkers()
 	q.startDuplicateCleanup()
 	return q
 }
@@ -62,49 +48,6 @@ func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
 	q.healthChecker = healthChecker
 }
 
-func (q *QueueService) startWorkers() {
-	for i := 0; i < q.workerCount; i++ {
-		q.workerWg.Add(1)
-		go q.worker()
-	}
-}
-
-func (q *QueueService) startRequeueWorkers() {
-	for i := 0; i < q.requeueCount; i++ {
-		q.requeueWg.Add(1)
-		go q.requeueWorker()
-	}
-}
-
-func (q *QueueService) worker() {
-	defer q.workerWg.Done()
-
-	for {
-		select {
-		case <-q.ctx.Done():
-			return
-		case item := <-q.workerChan:
-			if !q.fastQueue.Push([]byte(item)) {
-				log.Printf("Failed to push item to queue: queue full")
-			}
-		}
-	}
-}
-
-func (q *QueueService) requeueWorker() {
-	defer q.requeueWg.Done()
-
-	for {
-		select {
-		case <-q.ctx.Done():
-			return
-		case item := <-q.requeueChan:
-			if !q.fastQueue.PushFront([]byte(item)) {
-				log.Printf("Failed to requeue item: queue full")
-			}
-		}
-	}
-}
 
 func (q *QueueService) Add(item string) {
 	var payment types.PaymentRequest
@@ -118,28 +61,14 @@ func (q *QueueService) Add(item string) {
 		return
 	}
 
-	select {
-	case q.workerChan <- item:
-	case <-q.ctx.Done():
-		log.Printf("Queue service stopped, cannot add item")
-	default:
-		log.Printf("Worker channel full, attempting direct queue push")
-		if !q.fastQueue.Push([]byte(item)) {
-			log.Printf("Failed to push item to queue: queue full")
-		}
+	if !q.fastQueue.Push([]byte(item)) {
+		log.Printf("Failed to push item to queue: queue full")
 	}
 }
 
 func (q *QueueService) Requeue(item string) {
-	select {
-	case q.requeueChan <- item:
-	case <-q.ctx.Done():
-		log.Printf("Queue service stopped, cannot requeue item")
-	default:
-		log.Printf("Requeue channel full, attempting direct queue push")
-		if !q.fastQueue.PushFront([]byte(item)) {
-			log.Printf("Failed to requeue item: queue full")
-		}
+	if !q.fastQueue.PushFront([]byte(item)) {
+		log.Printf("Failed to requeue item: queue full")
 	}
 }
 
@@ -151,12 +80,6 @@ func (q *QueueService) Start() {
 func (q *QueueService) Stop() {
 	q.isProcessing = false
 	q.cancel()
-
-	close(q.workerChan)
-	q.workerWg.Wait()
-
-	close(q.requeueChan)
-	q.requeueWg.Wait()
 }
 
 func (q *QueueService) startProcessing() {
@@ -217,7 +140,7 @@ func (q *QueueService) startDuplicateCleanup() {
 				now := time.Now().Unix()
 				cutoff := now - 300
 
-				q.duplicateTracker.Range(func(key, value interface{}) bool {
+				q.duplicateTracker.Range(func(key, value any) bool {
 					if timestamp, ok := value.(int64); ok && timestamp < cutoff {
 						q.duplicateTracker.Delete(key)
 					}
