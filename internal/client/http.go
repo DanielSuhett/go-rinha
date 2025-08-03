@@ -40,7 +40,7 @@ func (h *HTTPClient) PostPayment(url string, payment *types.PaymentRequest) (int
 	req.Header.SetContentType("application/json")
 	req.SetBody(jsonData)
 
-	err = h.client.DoTimeout(req, resp, 1*time.Second)
+	err = h.client.DoTimeout(req, resp, 3*time.Second)
 	if err != nil {
 		return 0, fmt.Errorf("request failed: %w", err)
 	}

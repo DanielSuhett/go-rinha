@@ -70,6 +70,9 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 			log.Printf("Failed to save payment: %v", err)
 			return err
 		}
+	} else if statusCode == 422 {
+		log.Printf("Payment rejected (422): %s - dropping request", payment.CorrelationID)
+		return nil
 	} else {
 		circuitBreaker.SignalFailure(processor)
 		queueService.Requeue(data)

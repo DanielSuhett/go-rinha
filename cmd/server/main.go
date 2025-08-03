@@ -33,7 +33,7 @@ func main() {
 
 	httpClient := client.NewHTTPClient()
 	circuitBreaker := health.NewChecker(httpClient, redisClient, cfg)
-	queueService := service.NewQueueService(redisClient, cfg)
+	queueService := service.NewQueueService(cfg)
 	paymentRepo := repository.NewPaymentRepository(httpClient, redisClient, cfg)
 	paymentService := service.NewPaymentService(circuitBreaker, queueService, paymentRepo)
 
