@@ -29,7 +29,7 @@ services:
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
-      - POOLING_INTERVAL=500
+      - POOLING_INTERVAL=1000
       - HEALTH_TIMEOUT=1000
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
@@ -48,7 +48,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.60"
+          cpus: "0.50"
           memory: "130MB"
   api2:
     build:
@@ -62,7 +62,7 @@ services:
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
-      - POOLING_INTERVAL=500
+      - POOLING_INTERVAL=1000
       - HEALTH_TIMEOUT=1000
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
@@ -99,7 +99,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.30"
           memory: "50MB"
 
 networks:

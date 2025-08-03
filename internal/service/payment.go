@@ -13,6 +13,7 @@ type PaymentService struct {
 }
 
 func NewPaymentService(circuitBreaker *health.Checker, queueService *QueueService, repository *repository.PaymentRepository) *PaymentService {
+	queueService.SetHealthChecker(circuitBreaker)
 	return &PaymentService{
 		circuitBreaker: circuitBreaker,
 		queueService:   queueService,

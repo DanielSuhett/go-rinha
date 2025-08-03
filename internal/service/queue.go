@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"go-rinha/internal/config"
+	"go-rinha/internal/types"
 	"go-rinha/pkg/redis"
 	"log"
 	"sync"
@@ -16,6 +17,7 @@ type QueueService struct {
 	cancel           context.CancelFunc
 	paymentProcessor func(string) error
 	isProcessing     bool
+	healthChecker    HealthChecker
 
 	workerChan  chan string
 	workerWg    sync.WaitGroup
@@ -24,6 +26,10 @@ type QueueService struct {
 	requeueChan  chan string
 	requeueWg    sync.WaitGroup
 	requeueCount int
+}
+
+type HealthChecker interface {
+	GetCurrentColor() types.CircuitBreakerColor
 }
 
 func NewQueueService(redisClient *redis.Client, config *config.Config) *QueueService {
@@ -47,6 +53,10 @@ func NewQueueService(redisClient *redis.Client, config *config.Config) *QueueSer
 
 func (q *QueueService) SetPaymentProcessor(processor func(string) error) {
 	q.paymentProcessor = processor
+}
+
+func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
+	q.healthChecker = healthChecker
 }
 
 func (q *QueueService) startWorkers() {
@@ -147,6 +157,14 @@ func (q *QueueService) startProcessing() {
 }
 
 func (q *QueueService) processBatch() {
+	if q.healthChecker != nil {
+		currentColor := q.healthChecker.GetCurrentColor()
+		if currentColor == types.ColorRed {
+			time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
+			return
+		}
+	}
+
 	batch, err := q.redisClient.Dequeue(q.ctx, q.config.GetRedisKeyPrefix(), q.config.BatchSize)
 	if err != nil {
 		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
