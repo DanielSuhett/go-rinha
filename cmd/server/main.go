@@ -55,7 +55,7 @@ func main() {
 		ReduceMemoryUsage:             false,
 		GetOnly:                       false,
 		DisablePreParseMultipartForm:  true,
-		LogAllErrors:                  false,
+		LogAllErrors:                  true,
 		SecureErrorLogMessage:         false,
 		DisableHeaderNamesNormalizing: true,
 		NoDefaultServerHeader:         true,
