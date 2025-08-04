@@ -108,24 +108,16 @@ func (q *QueueService) processBatch() {
 		return
 	}
 
-	batch := make([]string, len(batchBytes))
-	for i, item := range batchBytes {
-		batch[i] = string(item)
-	}
-
-	q.processItems(batch)
-}
-
-func (q *QueueService) processItems(items []string) {
-	for _, item := range items {
+	for _, item := range batchBytes {
 		if q.paymentProcessor != nil {
-			if err := q.paymentProcessor(item); err != nil {
+			if err := q.paymentProcessor(string(item)); err != nil {
 				log.Printf("Payment processing error: %v", err)
-				q.Requeue(item)
+				q.Requeue(string(item))
 			}
 		}
 	}
 }
+
 
 func (q *QueueService) startDuplicateCleanup() {
 	go func() {
