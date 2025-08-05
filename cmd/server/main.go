@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -11,14 +15,17 @@ import (
 
 	"go-rinha/internal/client"
 	"go-rinha/internal/config"
-	"go-rinha/internal/handler"
 	"go-rinha/internal/repository"
 	"go-rinha/internal/service"
 	"go-rinha/pkg/health"
 	"go-rinha/pkg/redis"
-
-	"github.com/valyala/fasthttp"
 )
+
+type UDSServer struct {
+	paymentService *service.PaymentService
+	queueService   *service.QueueService
+	config         *config.Config
+}
 
 func main() {
 	cfg, err := config.LoadConfig()
@@ -33,45 +40,49 @@ func main() {
 
 	httpClient := client.NewHTTPClient()
 	circuitBreaker := health.NewChecker(httpClient, redisClient, cfg)
-	queueService := service.NewQueueService(redisClient, cfg)
+	queueService := service.NewQueueService(cfg)
 	paymentRepo := repository.NewPaymentRepository(httpClient, redisClient, cfg)
 	paymentService := service.NewPaymentService(circuitBreaker, queueService, paymentRepo)
 
 	queueService.SetPaymentProcessor(paymentService.ProcessPayment)
 
-	paymentHandler := handler.NewPaymentHandler(paymentService, queueService)
+	server := &UDSServer{
+		paymentService: paymentService,
+		queueService:   queueService,
+		config:         cfg,
+	}
 
-	server := &fasthttp.Server{
-		Handler:                       setupRoutes(paymentHandler),
-		DisableKeepalive:              false,
-		MaxRequestBodySize:            4 * 1024,
-		ReadTimeout:                   100 * time.Millisecond,
-		WriteTimeout:                  100 * time.Millisecond,
-		IdleTimeout:                   10 * time.Second,
-		MaxConnsPerIP:                 0,
-		MaxRequestsPerConn:            0,
-		TCPKeepalive:                  true,
-		TCPKeepalivePeriod:            10 * time.Second,
-		ReduceMemoryUsage:             false,
-		GetOnly:                       false,
-		DisablePreParseMultipartForm:  true,
-		LogAllErrors:                  false,
-		SecureErrorLogMessage:         false,
-		DisableHeaderNamesNormalizing: true,
-		NoDefaultServerHeader:         true,
-		NoDefaultDate:                 true,
-		NoDefaultContentType:          true,
-		ReadBufferSize:                4096,
-		WriteBufferSize:               4096,
-		Concurrency:                   256 * 1024,
+	socketPath := os.Getenv("SOCKET_PATH")
+	if socketPath == "" {
+		socketPath = fmt.Sprintf("/var/run/sockets/app%s.sock", cfg.AppName)
+	}
+
+	os.Remove(socketPath)
+	os.MkdirAll("/var/run/sockets", 0755)
+
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		log.Fatalf("Failed to create Unix socket: %v", err)
+	}
+	defer listener.Close()
+
+	if err := os.Chmod(socketPath, 0666); err != nil {
+		log.Fatalf("Failed to set socket permissions: %v", err)
+	}
+
+	httpServer := &http.Server{
+		ReadTimeout:  50 * time.Millisecond,
+		WriteTimeout: 50 * time.Millisecond,
+		IdleTimeout:  30 * time.Second,
+		Handler:      server.setupRoutes(),
 	}
 
 	circuitBreaker.Start()
 	queueService.Start()
 
 	go func() {
-		addr := fmt.Sprintf("0.0.0.0:%d", cfg.AppPort)
-		if err := server.ListenAndServe(addr); err != nil {
+		log.Printf("Server listening on Unix socket: %s", socketPath)
+		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)
 		}
 	}()
@@ -80,33 +91,80 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	log.Println("Shutting down gracefully...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
 
 	circuitBreaker.Stop()
 	queueService.Stop()
 
-	if err := server.ShutdownWithContext(ctx); err != nil {
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 
+	os.Remove(socketPath)
 	redisClient.Close()
+	log.Println("Server stopped")
 }
 
-func setupRoutes(paymentHandler *handler.PaymentHandler) fasthttp.RequestHandler {
-	return func(ctx *fasthttp.RequestCtx) {
-		path := string(ctx.Path())
-		method := string(ctx.Method())
+func (s *UDSServer) setupRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/payments", s.handlePayments)
+	mux.HandleFunc("/payments-summary", s.handlePaymentsSummary)
+	mux.HandleFunc("/health", s.handleHealth)
+	return mux
+}
 
-		switch {
-		case method == "POST" && path == "/payments":
-			paymentHandler.PostPayments(ctx)
-		case method == "GET" && path == "/payments-summary":
-			paymentHandler.GetPaymentsSummary(ctx)
-		case method == "GET" && path == "/health":
-			paymentHandler.GetHealth(ctx)
-		default:
-			ctx.SetStatusCode(fasthttp.StatusNotFound)
+func (s *UDSServer) handlePayments(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	s.queueService.Add(string(body))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte(`{"status":"accepted"}`))
+}
+
+func (s *UDSServer) handlePaymentsSummary(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+
+	var fromTime, toTime *int64
+
+	if fromStr := query.Get("from"); fromStr != "" {
+		if from, err := time.Parse(time.RFC3339, fromStr); err == nil {
+			timestamp := from.UnixMilli()
+			fromTime = &timestamp
 		}
 	}
+
+	if toStr := query.Get("to"); toStr != "" {
+		if to, err := time.Parse(time.RFC3339, toStr); err == nil {
+			timestamp := to.UnixMilli()
+			toTime = &timestamp
+		}
+	}
+
+	result, err := s.paymentService.GetPaymentSummary(fromTime, toTime)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *UDSServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
 }

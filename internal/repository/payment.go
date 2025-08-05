@@ -9,6 +9,7 @@ import (
 	"go-rinha/internal/types"
 	"log"
 	"math"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +17,6 @@ import (
 	redisClient "go-rinha/pkg/redis"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/valyala/fasthttp"
 )
 
 type PaymentRepository struct {
@@ -53,13 +53,13 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 
 	statusCode, err := r.httpClient.PostPayment(url, payment)
 
-	if err != nil && err == fasthttp.ErrTimeout {
-		log.Printf("Timeout error with processor: %v", err)
-		queueService.Requeue(data)
-		return nil
-	}
-
 	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			log.Printf("Timeout error with processor %s: %v", processor, err)
+			queueService.Requeue(data)
+			return nil
+		}
+		log.Printf("Request error with processor %s: %v", processor, err)
 		circuitBreaker.SignalFailure(processor)
 		queueService.Requeue(data)
 		return nil
@@ -70,7 +70,11 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 			log.Printf("Failed to save payment: %v", err)
 			return err
 		}
+	} else if statusCode == 422 {
+		log.Printf("Payment rejected (422): %s - dropping request", payment.CorrelationID)
+		return nil
 	} else {
+		log.Printf("Non-success status %d from processor %s", statusCode, processor)
 		circuitBreaker.SignalFailure(processor)
 		queueService.Requeue(data)
 		return nil
