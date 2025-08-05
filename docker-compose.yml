@@ -4,6 +4,7 @@ services:
     container_name: go-rinha-nginx
     volumes:
       - ./nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - sockets:/var/run/sockets
     depends_on:
       - api1
       - api2
@@ -22,9 +23,11 @@ services:
       context: .
       dockerfile: Dockerfile
     hostname: api1
+    volumes:
+      - sockets:/var/run/sockets
     environment:
-      - APP_PORT=8080
       - APP_NAME=1
+      - SOCKET_PATH=/var/run/sockets/app1.sock
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
@@ -50,9 +53,11 @@ services:
       context: .
       dockerfile: Dockerfile
     hostname: api2
+    volumes:
+      - sockets:/var/run/sockets
     environment:
-      - APP_PORT=8081
       - APP_NAME=2
+      - SOCKET_PATH=/var/run/sockets/app2.sock
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
@@ -91,6 +96,9 @@ services:
         limits:
           cpus: "0.10"
           memory: "50MB"
+
+volumes:
+  sockets:
 
 networks:
   backend:

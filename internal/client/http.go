@@ -1,75 +1,95 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"go-rinha/internal/types"
+	"io"
+	"log"
+	"net/http"
 	"time"
-
-	"github.com/valyala/fasthttp"
 )
 
 type HTTPClient struct {
-	client *fasthttp.Client
+	client *http.Client
 }
 
 func NewHTTPClient() *HTTPClient {
+	transport := &http.Transport{
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   50,
+		MaxConnsPerHost:       100,
+		IdleConnTimeout:       60 * time.Second,
+		TLSHandshakeTimeout:   2 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Second,
+		DisableKeepAlives:     false,
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     false,
+	}
+
 	return &HTTPClient{
-		client: &fasthttp.Client{
-			ReadTimeout:         500 * time.Millisecond,
-			WriteTimeout:        500 * time.Millisecond,
-			MaxConnsPerHost:     50,
-			MaxIdleConnDuration: 5 * time.Second,
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   3 * time.Second,
 		},
 	}
 }
 
 func (h *HTTPClient) PostPayment(url string, payment *types.PaymentRequest) (int, error) {
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-
 	jsonData, err := json.Marshal(payment)
 	if err != nil {
 		return 0, fmt.Errorf("failed to marshal payment: %w", err)
 	}
 
-	req.SetRequestURI(url)
-	req.Header.SetMethod(fasthttp.MethodPost)
-	req.Header.SetContentType("application/json")
-	req.SetBody(jsonData)
-
-	err = h.client.DoTimeout(req, resp, 3*time.Second)
+	resp, err := h.client.Post(url, "application/json", bytes.NewReader(jsonData))
 	if err != nil {
 		return 0, fmt.Errorf("request failed: %w", err)
 	}
+	defer resp.Body.Close()
 
-	return resp.StatusCode(), nil
+	// Read response body fully to enable connection reuse
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		// If we can't read the body, still try to discard it
+		io.Copy(io.Discard, resp.Body)
+		return resp.StatusCode, nil
+	}
+
+	// Log response body for non-success status codes (debugging)
+	if resp.StatusCode >= 400 {
+		log.Printf("Payment processor error %d: %s", resp.StatusCode, string(body))
+	}
+
+	return resp.StatusCode, nil
 }
 
 func (h *HTTPClient) GetHealth(url string, timeout time.Duration) (int, []byte, time.Duration, error) {
-	req := fasthttp.AcquireRequest()
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(req)
-	defer fasthttp.ReleaseResponse(resp)
-
-	req.SetRequestURI(url)
-	req.Header.SetMethod(fasthttp.MethodGet)
+	oldTimeout := h.client.Timeout
+	h.client.Timeout = timeout
+	defer func() {
+		h.client.Timeout = oldTimeout
+	}()
 
 	start := time.Now()
-	err := h.client.DoTimeout(req, resp, timeout)
+	resp, err := h.client.Get(url)
 	duration := time.Since(start)
 
 	if err != nil {
 		return 0, nil, duration, fmt.Errorf("health check failed: %w", err)
 	}
+	defer resp.Body.Close()
 
-	body := make([]byte, len(resp.Body()))
-	copy(body, resp.Body())
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, duration, fmt.Errorf("failed to read response body: %w", err)
+	}
 
-	return resp.StatusCode(), body, duration, nil
+	return resp.StatusCode, body, duration, nil
 }
 
 func (h *HTTPClient) Close() {
+	if transport, ok := h.client.Transport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
 }

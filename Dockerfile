@@ -19,17 +19,18 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     -o main ./cmd/server && \
     upx --best --lzma main
 
-FROM scratch AS runtime
+FROM alpine:latest AS runtime
 
-COPY --from=alpine:latest /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN apk add --no-cache ca-certificates
+
+RUN mkdir -p /var/run/sockets && chmod 755 /var/run/sockets
 
 COPY --from=builder /app/main /main
 
-USER 1001:1001
+RUN chmod +x /main
 
-EXPOSE 8080
-
-ENV GOMEMLIMIT=90MiB \
+ENV SOCKET_PATH=/var/run/sockets/app.sock \
+    GOMEMLIMIT=90MiB \
     GOMAXPROCS=1 \
     GODEBUG=gctrace=0,schedtrace=0,scheddetail=0 \
     GOTRACEBACK=none \
