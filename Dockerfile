@@ -31,7 +31,6 @@ RUN chmod +x /main
 
 ENV SOCKET_PATH=/var/run/sockets/app.sock \
     GOMEMLIMIT=90MiB \
-    GOMAXPROCS=1 \
     GODEBUG=gctrace=0,schedtrace=0,scheddetail=0 \
     GOTRACEBACK=none \
     GOGCCFLAGS="-m64 -march=native -mtune=native" \
