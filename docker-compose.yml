@@ -37,6 +37,8 @@ services:
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
       - BATCH_SIZE=100
+      - GOMAXPROCS=1
+      - GOGC=200
     networks:
       - backend
       - payment-processor
@@ -67,6 +69,8 @@ services:
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
       - BATCH_SIZE=100
+      - GOMAXPROCS=1
+      - GOGC=200
     networks:
       - backend
       - payment-processor

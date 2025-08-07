@@ -48,15 +48,12 @@ func (h *HTTPClient) PostPayment(url string, payment *types.PaymentRequest) (int
 	}
 	defer resp.Body.Close()
 
-	// Read response body fully to enable connection reuse
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		// If we can't read the body, still try to discard it
 		io.Copy(io.Discard, resp.Body)
 		return resp.StatusCode, nil
 	}
 
-	// Log response body for non-success status codes (debugging)
 	if resp.StatusCode >= 400 {
 		log.Printf("Payment processor error %d: %s", resp.StatusCode, string(body))
 	}

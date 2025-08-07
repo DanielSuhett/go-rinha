@@ -122,16 +122,12 @@ func (s *UDSServer) handlePayments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
+	body, _ := io.ReadAll(r.Body)
+	go func(r []byte) {
+		s.queueService.Add(string(body))
+	}(body)
 
-	s.queueService.Add(string(body))
-	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte(`{"status":"accepted"}`))
 }
 
 func (s *UDSServer) handlePaymentsSummary(w http.ResponseWriter, r *http.Request) {
