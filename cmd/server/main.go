@@ -2,12 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,9 +16,12 @@ import (
 	"go-rinha/internal/service"
 	"go-rinha/pkg/health"
 	"go-rinha/pkg/redis"
+
+	"github.com/bytedance/sonic"
+	"github.com/valyala/fasthttp"
 )
 
-type UDSServer struct {
+type FastHTTPServer struct {
 	paymentService *service.PaymentService
 	queueService   *service.QueueService
 	config         *config.Config
@@ -42,11 +42,11 @@ func main() {
 	circuitBreaker := health.NewChecker(httpClient, redisClient, cfg)
 	queueService := service.NewQueueService(cfg)
 	paymentRepo := repository.NewPaymentRepository(httpClient, redisClient, cfg)
-	paymentService := service.NewPaymentService(circuitBreaker, queueService, paymentRepo)
+	paymentService := service.NewPaymentService(circuitBreaker, queueService, paymentRepo, cfg)
 
 	queueService.SetPaymentProcessor(paymentService.ProcessPayment)
 
-	server := &UDSServer{
+	server := &FastHTTPServer{
 		paymentService: paymentService,
 		queueService:   queueService,
 		config:         cfg,
@@ -70,19 +70,21 @@ func main() {
 		log.Fatalf("Failed to set socket permissions: %v", err)
 	}
 
-	httpServer := &http.Server{
-		ReadTimeout:  50 * time.Millisecond,
-		WriteTimeout: 50 * time.Millisecond,
-		IdleTimeout:  30 * time.Second,
-		Handler:      server.setupRoutes(),
+	fastHTTPServer := &fasthttp.Server{
+		Handler:            server.handler,
+		ReadTimeout:        500 * time.Millisecond,
+		WriteTimeout:       500 * time.Millisecond,
+		IdleTimeout:        30 * time.Second,
+		DisableKeepalive:   false,
+		MaxRequestBodySize: 1024,
 	}
 
 	circuitBreaker.Start()
 	queueService.Start()
 
 	go func() {
-		log.Printf("Server listening on Unix socket: %s", socketPath)
-		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
+		log.Printf("FastHTTP server listening on Unix socket: %s", socketPath)
+		if err := fastHTTPServer.Serve(listener); err != nil {
 			log.Fatalf("Server failed to start: %v", err)
 		}
 	}()
@@ -93,13 +95,10 @@ func main() {
 
 	log.Println("Shutting down gracefully...")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-
 	circuitBreaker.Stop()
 	queueService.Stop()
 
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+	if err := fastHTTPServer.Shutdown(); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 
@@ -108,42 +107,52 @@ func main() {
 	log.Println("Server stopped")
 }
 
-func (s *UDSServer) setupRoutes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/payments", s.handlePayments)
-	mux.HandleFunc("/payments-summary", s.handlePaymentsSummary)
-	mux.HandleFunc("/health", s.handleHealth)
-	return mux
+func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
+	path := string(ctx.Path())
+
+	switch path {
+	case "/payments":
+		if !ctx.IsPost() {
+			ctx.SetStatusCode(fasthttp.StatusMethodNotAllowed)
+			return
+		}
+		s.handlePayments(ctx)
+	case "/payments-summary":
+		s.handlePaymentsSummary(ctx)
+	case "/health":
+		s.handleHealth(ctx)
+	default:
+		ctx.SetStatusCode(fasthttp.StatusNotFound)
+	}
 }
 
-func (s *UDSServer) handlePayments(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+func (s *FastHTTPServer) handlePayments(ctx *fasthttp.RequestCtx) {
+	body := ctx.Request.Body()
+	if len(body) == 0 {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 		return
 	}
 
-	body, _ := io.ReadAll(r.Body)
-	go func(r []byte) {
-		s.queueService.Add(string(body))
+	go func(body []byte) {
+		bodyStr := string(body)
+		s.queueService.Add(bodyStr)
 	}(body)
 
-	w.WriteHeader(http.StatusCreated)
+	ctx.SetStatusCode(fasthttp.StatusCreated)
 }
 
-func (s *UDSServer) handlePaymentsSummary(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-
+func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
 	var fromTime, toTime *int64
 
-	if fromStr := query.Get("from"); fromStr != "" {
-		if from, err := time.Parse(time.RFC3339, fromStr); err == nil {
+	if fromBytes := ctx.QueryArgs().Peek("from"); fromBytes != nil {
+		if from, err := time.Parse(time.RFC3339, string(fromBytes)); err == nil {
 			timestamp := from.UnixMilli()
 			fromTime = &timestamp
 		}
 	}
 
-	if toStr := query.Get("to"); toStr != "" {
-		if to, err := time.Parse(time.RFC3339, toStr); err == nil {
+	if toBytes := ctx.QueryArgs().Peek("to"); toBytes != nil {
+		if to, err := time.Parse(time.RFC3339, string(toBytes)); err == nil {
 			timestamp := to.UnixMilli()
 			toTime = &timestamp
 		}
@@ -151,16 +160,22 @@ func (s *UDSServer) handlePaymentsSummary(w http.ResponseWriter, r *http.Request
 
 	result, err := s.paymentService.GetPaymentSummary(fromTime, toTime)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	responseData, err := sonic.ConfigFastest.Marshal(result)
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		return
+	}
+
+	ctx.SetContentType("application/json")
+	ctx.Write(responseData)
 }
 
-func (s *UDSServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`{"status":"ok"}`))
+func (s *FastHTTPServer) handleHealth(ctx *fasthttp.RequestCtx) {
+	ctx.SetContentType("application/json")
+	ctx.SetStatusCode(fasthttp.StatusOK)
+	ctx.WriteString(`{"status":"ok"}`)
 }

@@ -2,11 +2,11 @@ package repository
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"go-rinha/internal/client"
 	"go-rinha/internal/config"
 	"go-rinha/internal/types"
+	"go-rinha/pkg/pool"
 	"log"
 	"math"
 	"net"
@@ -16,6 +16,7 @@ import (
 
 	redisClient "go-rinha/pkg/redis"
 
+	"github.com/bytedance/sonic"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -71,7 +72,11 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 			return err
 		}
 	} else if statusCode == 422 {
-		log.Printf("Payment rejected (422): %s - dropping request", payment.CorrelationID)
+		log.Printf("Payment already exists (422): %s - counting as successful", payment.CorrelationID)
+		if err := r.save(processor, payment.Amount, payment.CorrelationID, payment.RequestedAt); err != nil {
+			log.Printf("Failed to save duplicate payment: %v", err)
+			return err
+		}
 		return nil
 	} else {
 		log.Printf("Non-success status %d from processor %s", statusCode, processor)
@@ -85,7 +90,13 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 
 func (r *PaymentRepository) parsePaymentWithTimestamp(data string) (*types.PaymentRequest, error) {
 	var payment types.PaymentRequest
-	if err := json.Unmarshal([]byte(data), &payment); err != nil {
+	
+	buffer := pool.GetByteBuffer()
+	defer pool.PutByteBuffer(buffer)
+	
+	buffer = append(buffer, data...)
+	
+	if err := sonic.ConfigFastest.Unmarshal(buffer, &payment); err != nil {
 		return nil, err
 	}
 

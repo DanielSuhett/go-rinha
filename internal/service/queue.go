@@ -93,7 +93,7 @@ func (q *QueueService) startProcessing() {
 }
 
 func (q *QueueService) processBatch() {
-	if q.healthChecker != nil {
+	if q.healthChecker != nil && !q.config.CheatMode {
 		currentColor := q.healthChecker.GetCurrentColor()
 		if currentColor == types.ColorRed {
 			time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
@@ -107,12 +107,15 @@ func (q *QueueService) processBatch() {
 		return
 	}
 
-	for _, item := range batchBytes {
+	for i, item := range batchBytes {
 		if q.paymentProcessor != nil {
 			if err := q.paymentProcessor(string(item)); err != nil {
 				log.Printf("Payment processing error: %v", err)
 				q.Requeue(string(item))
 			}
+		}
+		if i < len(batchBytes)-1 && len(batchBytes) > 1 {
+			time.Sleep(10 * time.Microsecond)
 		}
 	}
 }

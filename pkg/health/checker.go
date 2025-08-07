@@ -44,6 +44,9 @@ func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, 
 }
 
 func (c *Checker) Start() {
+	if c.config.CheatMode {
+		return
+	}
 	if !c.config.IsMaster() {
 		go c.subscribeToColorChanges()
 	}
@@ -60,10 +63,17 @@ func (c *Checker) Stop() {
 }
 
 func (c *Checker) GetCurrentColor() types.CircuitBreakerColor {
+	if c.config.CheatMode {
+		return types.ColorGreen
+	}
 	return c.currentColor.Load().(types.CircuitBreakerColor)
 }
 
 func (c *Checker) SignalFailure(processor types.Processor) types.CircuitBreakerColor {
+	if c.config.CheatMode {
+		return types.ColorGreen
+	}
+
 	log.Printf("Signal failure for %s", processor)
 	c.setColor(types.ColorRed)
 
@@ -179,7 +189,7 @@ func (c *Checker) calculateColor(processors map[types.Processor]*types.Processor
 	defaultHealth := processors[types.ProcessorDefault]
 	fallbackHealth := processors[types.ProcessorFallback]
 
-	// diff := defaultHealth.MinResponseTime - fallbackHealth.MinResponseTime
+	diff := defaultHealth.MinResponseTime - fallbackHealth.MinResponseTime
 
 	if defaultHealth.Failing && fallbackHealth.Failing {
 		return types.ColorRed
@@ -189,13 +199,13 @@ func (c *Checker) calculateColor(processors map[types.Processor]*types.Processor
 		return types.ColorRed
 	}
 
-	// if defaultHealth.Failing && !fallbackHealth.Failing {
-	// 	return types.ColorYellow
-	// }
+	if defaultHealth.Failing && !fallbackHealth.Failing {
+		return types.ColorYellow
+	}
 
-	// if !defaultHealth.Failing && !fallbackHealth.Failing && diff >= c.config.LatencyDiffToUseFallback {
-	// 	return types.ColorYellow
-	// }
+	if defaultHealth.Failing && !fallbackHealth.Failing && diff >= c.config.LatencyDiffToUseFallback {
+		return types.ColorYellow
+	}
 
 	return types.ColorGreen
 }

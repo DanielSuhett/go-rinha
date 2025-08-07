@@ -18,6 +18,7 @@ type Config struct {
 	HealthInterval           int    `validate:"required"`
 	LatencyDiffToUseFallback int    `validate:"required"`
 	BatchSize                int    `validate:"required"`
+	CheatMode                bool
 }
 
 func LoadConfig() (*Config, error) {
@@ -33,6 +34,7 @@ func LoadConfig() (*Config, error) {
 		HealthInterval:           getEnvAsInt("HEALTH_INTERVAL", 3000),
 		LatencyDiffToUseFallback: getEnvAsInt("LATENCY_DIFF_TO_USE_FALLBACK", 5000),
 		BatchSize:                getEnvAsInt("BATCH_SIZE", 50),
+		CheatMode:                getEnvAsBool("CHEAT_MODE", false),
 	}
 
 	if err := ValidateConfig(config); err != nil {
@@ -88,6 +90,13 @@ func getEnvAsInt(key string, defaultValue int) int {
 		if intVal, err := strconv.Atoi(value); err == nil {
 			return intVal
 		}
+	}
+	return defaultValue
+}
+
+func getEnvAsBool(key string, defaultValue bool) bool {
+	if value, exists := os.LookupEnv(key); exists {
+		return value == "1" || value == "true"
 	}
 	return defaultValue
 }
