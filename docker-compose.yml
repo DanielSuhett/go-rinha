@@ -22,6 +22,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    #image: danielsuhett1999/rinha-backend-go:1.0.10
     hostname: api1
     volumes:
       - sockets:/var/run/sockets
@@ -37,7 +38,6 @@ services:
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
       - BATCH_SIZE=100
-      - CHEAT_MODE=1
     networks:
       - backend
       - payment-processor
@@ -53,6 +53,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    #image: danielsuhett1999/rinha-backend-go:1.0.10
     hostname: api2
     volumes:
       - sockets:/var/run/sockets
@@ -68,7 +69,6 @@ services:
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
       - BATCH_SIZE=100
-      - CHEAT_MODE=1
     networks:
       - backend
       - payment-processor
@@ -78,7 +78,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.60"
+          cpus: "0.50"
           memory: "100MB"
   redis:
     image: redis:7.2-alpine
@@ -96,7 +96,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.10"
+          cpus: "0.20"
           memory: "50MB"
 
 volumes:

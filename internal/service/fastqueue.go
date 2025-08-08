@@ -5,7 +5,7 @@ import (
 )
 
 type FastQueue struct {
-	buffer [][]byte
+	buffer []string
 	head   uint64
 	tail   uint64
 	mask   uint64
@@ -17,12 +17,12 @@ func NewFastQueue(size int) *FastQueue {
 	}
 
 	return &FastQueue{
-		buffer: make([][]byte, size),
+		buffer: make([]string, size),
 		mask:   uint64(size - 1),
 	}
 }
 
-func (q *FastQueue) Push(data []byte) bool {
+func (q *FastQueue) Push(data string) bool {
 	head := atomic.LoadUint64(&q.head)
 	next := head + 1
 
@@ -35,7 +35,7 @@ func (q *FastQueue) Push(data []byte) bool {
 	return true
 }
 
-func (q *FastQueue) PushFront(data []byte) bool {
+func (q *FastQueue) PushFront(data string) bool {
 	tail := atomic.LoadUint64(&q.tail)
 	head := atomic.LoadUint64(&q.head)
 
@@ -49,12 +49,12 @@ func (q *FastQueue) PushFront(data []byte) bool {
 	return true
 }
 
-func (q *FastQueue) Pop() ([]byte, bool) {
+func (q *FastQueue) Pop() (string, bool) {
 	tail := atomic.LoadUint64(&q.tail)
 	head := atomic.LoadUint64(&q.head)
 
 	if tail == head {
-		return nil, false
+		return "", false
 	}
 
 	data := q.buffer[tail&q.mask]
@@ -62,7 +62,7 @@ func (q *FastQueue) Pop() ([]byte, bool) {
 	return data, true
 }
 
-func (q *FastQueue) PopBatch(maxCount int) [][]byte {
+func (q *FastQueue) PopBatch(maxCount int) []string {
 	if maxCount <= 0 {
 		return nil
 	}
@@ -79,7 +79,7 @@ func (q *FastQueue) PopBatch(maxCount int) [][]byte {
 		available = maxCount
 	}
 
-	batch := make([][]byte, available)
+	batch := make([]string, available)
 	for i := 0; i < available; i++ {
 		batch[i] = q.buffer[(tail+uint64(i))&q.mask]
 	}

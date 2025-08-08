@@ -6,12 +6,12 @@ import (
 	"go-rinha/internal/client"
 	"go-rinha/internal/config"
 	"go-rinha/internal/types"
-	"go-rinha/pkg/pool"
 	"log"
 	"math"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	redisClient "go-rinha/pkg/redis"
@@ -56,33 +56,113 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			log.Printf("Timeout error with processor %s: %v", processor, err)
+			log.Printf("Timeout error with processor %s", processor)
 			queueService.Requeue(data)
 			return nil
 		}
-		log.Printf("Request error with processor %s: %v", processor, err)
 		circuitBreaker.SignalFailure(processor)
 		queueService.Requeue(data)
 		return nil
 	}
 
-	if statusCode == 200 || statusCode == 201 {
-		if err := r.save(processor, payment.Amount, payment.CorrelationID, payment.RequestedAt); err != nil {
-			log.Printf("Failed to save payment: %v", err)
-			return err
-		}
-	} else if statusCode == 422 {
+	switch statusCode {
+	case 200, 201:
+		go func(processor types.Processor, payment *types.PaymentRequest) {
+			if err := r.save(processor, payment.Amount, payment.CorrelationID, payment.RequestedAt); err != nil {
+				log.Printf("Failed to save payment: %v", err)
+			}
+		}(processor, payment)
+
+		return nil
+	case 422:
 		log.Printf("Payment already exists (422): %s - counting as successful", payment.CorrelationID)
 		if err := r.save(processor, payment.Amount, payment.CorrelationID, payment.RequestedAt); err != nil {
 			log.Printf("Failed to save duplicate payment: %v", err)
 			return err
 		}
 		return nil
-	} else {
-		log.Printf("Non-success status %d from processor %s", statusCode, processor)
+	default:
 		circuitBreaker.SignalFailure(processor)
 		queueService.Requeue(data)
 		return nil
+	}
+}
+
+type CircuitBreaker interface {
+	SignalFailure(processor types.Processor) types.CircuitBreakerColor
+}
+
+type QueueService interface {
+	Requeue(item string)
+}
+
+func (r *PaymentRepository) SendBatch(processor types.Processor, items []string, circuitBreaker CircuitBreaker, queueService QueueService) error {
+	var successfulPayments []BatchPayment
+	var failedItems []string
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	url := r.config.GetProcessorPaymentURL(string(processor))
+	if url == "" {
+		for _, item := range items {
+			queueService.Requeue(item)
+		}
+		return nil
+	}
+
+	for _, data := range items {
+		payment, err := r.parsePaymentWithTimestamp(data)
+		if err != nil {
+			mu.Lock()
+			failedItems = append(failedItems, data)
+			mu.Unlock()
+			continue
+		}
+
+		wg.Add(1)
+		go func(data string, payment *types.PaymentRequest) {
+			defer wg.Done()
+			
+			statusCode, err := r.httpClient.PostPayment(url, payment)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					log.Printf("Timeout error with processor %s", processor)
+				} else {
+					circuitBreaker.SignalFailure(processor)
+				}
+				failedItems = append(failedItems, data)
+				return
+			}
+
+			switch statusCode {
+			case 200, 201, 422:
+				successfulPayments = append(successfulPayments, BatchPayment{
+					Processor:     processor,
+					Amount:        payment.Amount,
+					CorrelationID: payment.CorrelationID,
+					RequestedAt:   payment.RequestedAt,
+				})
+			default:
+				circuitBreaker.SignalFailure(processor)
+				failedItems = append(failedItems, data)
+			}
+		}(data, payment)
+	}
+
+	wg.Wait()
+
+	if len(successfulPayments) > 0 {
+		if err := r.saveBatch(successfulPayments); err != nil {
+			log.Printf("Failed to save batch payments: %v", err)
+		}
+	}
+
+	for _, item := range failedItems {
+		queueService.Requeue(item)
 	}
 
 	return nil
@@ -90,13 +170,8 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 
 func (r *PaymentRepository) parsePaymentWithTimestamp(data string) (*types.PaymentRequest, error) {
 	var payment types.PaymentRequest
-	
-	buffer := pool.GetByteBuffer()
-	defer pool.PutByteBuffer(buffer)
-	
-	buffer = append(buffer, data...)
-	
-	if err := sonic.ConfigFastest.Unmarshal(buffer, &payment); err != nil {
+
+	if err := sonic.ConfigFastest.UnmarshalFromString(data, &payment); err != nil {
 		return nil, err
 	}
 
@@ -108,6 +183,8 @@ func (r *PaymentRepository) parsePaymentWithTimestamp(data string) (*types.Payme
 }
 
 func (r *PaymentRepository) save(processor types.Processor, amount float64, correlationID, requestedAt string) error {
+	start := time.Now()
+	
 	timestamp, err := time.Parse(time.RFC3339, requestedAt)
 	if err != nil {
 		return fmt.Errorf("failed to parse timestamp: %w", err)
@@ -125,7 +202,59 @@ func (r *PaymentRepository) save(processor types.Processor, amount float64, corr
 	pipe.HIncrBy(r.ctx, statsKey, "count", 1)
 	pipe.HIncrByFloat(r.ctx, statsKey, "total", amount)
 
+	execStart := time.Now()
 	_, err = pipe.Exec(r.ctx)
+	execDuration := time.Since(execStart)
+	
+	totalDuration := time.Since(start)
+	if totalDuration >= time.Millisecond {
+		log.Printf("PERF: Redis save total=%v exec=%v", totalDuration, execDuration)
+	}
+	
+	return err
+}
+
+type BatchPayment struct {
+	Processor   types.Processor
+	Amount      float64
+	CorrelationID string
+	RequestedAt string
+}
+
+func (r *PaymentRepository) saveBatch(payments []BatchPayment) error {
+	if len(payments) == 0 {
+		return nil
+	}
+
+	start := time.Now()
+	pipe := r.redisClient.Pipeline()
+
+	for _, payment := range payments {
+		timestamp, err := time.Parse(time.RFC3339, payment.RequestedAt)
+		if err != nil {
+			continue
+		}
+
+		timelineKey := fmt.Sprintf("%s:%s:timeline", processedPaymentsPrefix, payment.Processor)
+		statsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, payment.Processor)
+
+		pipe.ZAddNX(r.ctx, timelineKey, redis.Z{
+			Score:  float64(timestamp.UnixMilli()),
+			Member: fmt.Sprintf("%.2f:%s", payment.Amount, payment.CorrelationID),
+		})
+		pipe.HIncrBy(r.ctx, statsKey, "count", 1)
+		pipe.HIncrByFloat(r.ctx, statsKey, "total", payment.Amount)
+	}
+
+	execStart := time.Now()
+	_, err := pipe.Exec(r.ctx)
+	execDuration := time.Since(execStart)
+	
+	totalDuration := time.Since(start)
+	if totalDuration >= time.Millisecond {
+		log.Printf("PERF: Redis saveBatch(%d payments) total=%v exec=%v", len(payments), totalDuration, execDuration)
+	}
+	
 	return err
 }
 

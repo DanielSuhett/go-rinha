@@ -44,7 +44,7 @@ func main() {
 	paymentRepo := repository.NewPaymentRepository(httpClient, redisClient, cfg)
 	paymentService := service.NewPaymentService(circuitBreaker, queueService, paymentRepo, cfg)
 
-	queueService.SetPaymentProcessor(paymentService.ProcessPayment)
+	queueService.SetPaymentBatchProcessor(paymentService.ProcessPaymentBatch)
 
 	server := &FastHTTPServer{
 		paymentService: paymentService,
@@ -72,8 +72,8 @@ func main() {
 
 	fastHTTPServer := &fasthttp.Server{
 		Handler:            server.handler,
-		ReadTimeout:        500 * time.Millisecond,
-		WriteTimeout:       500 * time.Millisecond,
+		ReadTimeout:        5000 * time.Millisecond,
+		WriteTimeout:       5000 * time.Millisecond,
 		IdleTimeout:        30 * time.Second,
 		DisableKeepalive:   false,
 		MaxRequestBodySize: 1024,
@@ -112,10 +112,6 @@ func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 
 	switch path {
 	case "/payments":
-		if !ctx.IsPost() {
-			ctx.SetStatusCode(fasthttp.StatusMethodNotAllowed)
-			return
-		}
 		s.handlePayments(ctx)
 	case "/payments-summary":
 		s.handlePaymentsSummary(ctx)
@@ -128,20 +124,22 @@ func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 
 func (s *FastHTTPServer) handlePayments(ctx *fasthttp.RequestCtx) {
 	body := ctx.Request.Body()
-	if len(body) == 0 {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
-		return
-	}
 
-	go func(body []byte) {
-		bodyStr := string(body)
-		s.queueService.Add(bodyStr)
-	}(body)
+	go func() {
+		queueStart := time.Now()
+		s.queueService.Add(body)
+		queueDuration := time.Since(queueStart)
+		if queueDuration >= time.Millisecond {
+			log.Printf("PERF: Queue.Add took %v", queueDuration)
+		}
+	}()
 
 	ctx.SetStatusCode(fasthttp.StatusCreated)
 }
 
 func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
+	time.Sleep(100 * time.Millisecond)
+
 	var fromTime, toTime *int64
 
 	if fromBytes := ctx.QueryArgs().Peek("from"); fromBytes != nil {

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"go-rinha/internal/types"
 	"io"
-	"log"
 	"net/http"
 	"time"
 )
@@ -48,14 +47,10 @@ func (h *HTTPClient) PostPayment(url string, payment *types.PaymentRequest) (int
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	_, err = io.ReadAll(resp.Body)
 	if err != nil {
 		io.Copy(io.Discard, resp.Body)
 		return resp.StatusCode, nil
-	}
-
-	if resp.StatusCode >= 400 {
-		log.Printf("Payment processor error %d: %s", resp.StatusCode, string(body))
 	}
 
 	return resp.StatusCode, nil
