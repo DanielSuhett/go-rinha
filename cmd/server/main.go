@@ -125,15 +125,7 @@ func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 func (s *FastHTTPServer) handlePayments(ctx *fasthttp.RequestCtx) {
 	body := ctx.Request.Body()
 
-	go func() {
-		queueStart := time.Now()
-		s.queueService.Add(body)
-		queueDuration := time.Since(queueStart)
-		if queueDuration >= time.Millisecond {
-			log.Printf("PERF: Queue.Add took %v", queueDuration)
-		}
-	}()
-
+	s.queueService.Add(body)
 	ctx.SetStatusCode(fasthttp.StatusCreated)
 }
 

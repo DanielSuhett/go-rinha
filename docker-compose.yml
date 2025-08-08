@@ -33,11 +33,12 @@ services:
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
-      - POOLING_INTERVAL=1000
+      - POOLING_INTERVAL=100
       - HEALTH_TIMEOUT=1000
-      - HEALTH_INTERVAL=3000
+      - HEALTH_INTERVAL=6000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
-      - BATCH_SIZE=100
+      - BATCH_SIZE=25
+      - GOGC=off
     networks:
       - backend
       - payment-processor
@@ -47,7 +48,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.60"
+          cpus: "0.50"
           memory: "100MB"
   api2:
     build:
@@ -64,11 +65,12 @@ services:
       - REDIS_PORT=6379
       - PROCESSOR_DEFAULT_URL=http://payment-processor-default:8080
       - PROCESSOR_FALLBACK_URL=http://payment-processor-fallback:8080
-      - POOLING_INTERVAL=1000
+      - POOLING_INTERVAL=100
       - HEALTH_TIMEOUT=1000
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
-      - BATCH_SIZE=100
+      - BATCH_SIZE=25
+      - GOGC=off
     networks:
       - backend
       - payment-processor
@@ -81,9 +83,9 @@ services:
           cpus: "0.50"
           memory: "100MB"
   redis:
-    image: redis:7.2-alpine
+    image: valkey/valkey:7.2-alpine
     container_name: go-rinha-redis
-    command: redis-server --save "" --appendonly no --maxmemory 40mb --maxmemory-policy allkeys-lru --tcp-keepalive 30 --timeout 0 --tcp-backlog 1024 --databases 1 --maxclients 5000 --rdbcompression no --rdbchecksum no
+    command: redis-server --save "" --appendonly no --maxmemory 40mb --maxmemory-policy allkeys-lru --tcp-keepalive 30 --timeout 0 --tcp-backlog 4096 --databases 1 --maxclients 5000 --rdbcompression no --rdbchecksum no --hz 100
     networks:
       - backend
     ports:
@@ -96,7 +98,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.30"
           memory: "50MB"
 
 volumes:

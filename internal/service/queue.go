@@ -5,13 +5,13 @@ import (
 	"go-rinha/internal/config"
 	"go-rinha/internal/types"
 	"log"
-	"strings"
 	"sync"
 	"time"
 )
 
 type QueueService struct {
-	fastQueue             *FastQueue
+	queue                 chan string
+	priorityQueue         chan string
 	duplicateTracker      sync.Map
 	config                *config.Config
 	ctx                   context.Context
@@ -29,12 +29,12 @@ type HealthChecker interface {
 func NewQueueService(config *config.Config) *QueueService {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	queueSize := 1024 * 16
 	q := &QueueService{
-		fastQueue: NewFastQueue(queueSize),
-		config:    config,
-		ctx:       ctx,
-		cancel:    cancel,
+		queue:         make(chan string, 17000),
+		priorityQueue: make(chan string, 1000),
+		config:        config,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 
 	q.startDuplicateCleanup()
@@ -54,24 +54,22 @@ func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
 }
 
 func (q *QueueService) Add(item []byte) {
-	start := time.Now()
-	if !q.fastQueue.Push(string(item)) {
+	select {
+	case q.queue <- string(item):
+	default:
 		log.Printf("queue full")
-	}
-	duration := time.Since(start)
-	if duration >= time.Millisecond {
-		log.Printf("PERF: FastQueue.Push took %v", duration)
 	}
 }
 
 func (q *QueueService) Requeue(item string) {
-	correlationID := extractCorrelationID(item)
-	if _, exists := q.duplicateTracker.LoadOrStore(correlationID, time.Now().Unix()); exists {
-		return
-	}
-
-	if !q.fastQueue.PushFront(item) {
-		log.Printf("queue full")
+	select {
+	case q.priorityQueue <- item:
+	default:
+		select {
+		case q.queue <- item:
+		default:
+			log.Printf("queue full")
+		}
 	}
 }
 
@@ -83,6 +81,12 @@ func (q *QueueService) Start() {
 func (q *QueueService) Stop() {
 	q.isProcessing = false
 	q.cancel()
+	close(q.queue)
+	close(q.priorityQueue)
+}
+
+func (q *QueueService) Size() int {
+	return len(q.queue) + len(q.priorityQueue)
 }
 
 func (q *QueueService) startProcessing() {
@@ -106,7 +110,7 @@ func (q *QueueService) processBatch() {
 	}
 
 	start := time.Now()
-	batch := q.fastQueue.PopBatch(q.config.BatchSize)
+	batch := q.popBatch(q.config.BatchSize)
 	popDuration := time.Since(start)
 
 	if len(batch) == 0 {
@@ -119,6 +123,33 @@ func (q *QueueService) processBatch() {
 	}
 
 	go q.processBatchAsync(batch)
+}
+
+func (q *QueueService) popBatch(maxCount int) []string {
+	if maxCount <= 0 {
+		return nil
+	}
+
+	batch := make([]string, 0, maxCount)
+	timeout := time.After(10 * time.Millisecond)
+
+	for len(batch) < maxCount {
+		select {
+		case item := <-q.priorityQueue:
+			batch = append(batch, item)
+		case item := <-q.queue:
+			batch = append(batch, item)
+		case <-timeout:
+			return batch
+		default:
+			if len(batch) > 0 {
+				return batch
+			}
+			return nil
+		}
+	}
+
+	return batch
 }
 
 func (q *QueueService) processBatchAsync(batch []string) {
@@ -147,20 +178,6 @@ func (q *QueueService) processBatchAsync(batch []string) {
 		}
 		wg.Wait()
 	}
-}
-
-func extractCorrelationID(jsonStr string) string {
-	const key = `"correlationId":"`
-	start := strings.Index(jsonStr, key)
-	if start == -1 {
-		return ""
-	}
-	start += len(key)
-	end := strings.Index(jsonStr[start:], `"`)
-	if end == -1 {
-		return ""
-	}
-	return jsonStr[start : start+end]
 }
 
 func (q *QueueService) startDuplicateCleanup() {

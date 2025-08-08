@@ -29,6 +29,14 @@ type PaymentRepository struct {
 
 const processedPaymentsPrefix = "processed:payments"
 
+var (
+	strBuilderPool = sync.Pool{
+		New: func() interface{} {
+			return &strings.Builder{}
+		},
+	}
+)
+
 func NewPaymentRepository(httpClient *client.HTTPClient, redisClient *redisClient.Client, config *config.Config) *PaymentRepository {
 	return &PaymentRepository{
 		httpClient:  httpClient,
@@ -103,12 +111,6 @@ func (r *PaymentRepository) SendBatch(processor types.Processor, items []string,
 	var wg sync.WaitGroup
 
 	url := r.config.GetProcessorPaymentURL(string(processor))
-	if url == "" {
-		for _, item := range items {
-			queueService.Requeue(item)
-		}
-		return nil
-	}
 
 	for _, data := range items {
 		payment, err := r.parsePaymentWithTimestamp(data)
@@ -192,12 +194,21 @@ func (r *PaymentRepository) save(processor types.Processor, amount float64, corr
 
 	pipe := r.redisClient.Pipeline()
 
-	timelineKey := fmt.Sprintf("%s:%s:timeline", processedPaymentsPrefix, processor)
-	statsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, processor)
+	timelineKey := processedPaymentsPrefix + ":" + string(processor) + ":timeline"
+	statsKey := processedPaymentsPrefix + ":" + string(processor) + ":stats"
+
+	sb := strBuilderPool.Get().(*strings.Builder)
+	sb.Reset()
+	sb.Grow(32)
+	sb.WriteString(strconv.FormatFloat(amount, 'f', 2, 64))
+	sb.WriteByte(':')
+	sb.WriteString(correlationID)
+	member := sb.String()
+	strBuilderPool.Put(sb)
 
 	pipe.ZAddNX(r.ctx, timelineKey, redis.Z{
 		Score:  float64(timestamp.UnixMilli()),
-		Member: fmt.Sprintf("%.2f:%s", amount, correlationID),
+		Member: member,
 	})
 	pipe.HIncrBy(r.ctx, statsKey, "count", 1)
 	pipe.HIncrByFloat(r.ctx, statsKey, "total", amount)
@@ -215,10 +226,10 @@ func (r *PaymentRepository) save(processor types.Processor, amount float64, corr
 }
 
 type BatchPayment struct {
-	Processor   types.Processor
-	Amount      float64
+	Processor     types.Processor
+	Amount        float64
 	CorrelationID string
-	RequestedAt string
+	RequestedAt   string
 }
 
 func (r *PaymentRepository) saveBatch(payments []BatchPayment) error {
@@ -229,21 +240,50 @@ func (r *PaymentRepository) saveBatch(payments []BatchPayment) error {
 	start := time.Now()
 	pipe := r.redisClient.Pipeline()
 
+	timestampCache := make(map[string]int64)
+	processorGroups := make(map[types.Processor][]BatchPayment)
+
 	for _, payment := range payments {
-		timestamp, err := time.Parse(time.RFC3339, payment.RequestedAt)
-		if err != nil {
-			continue
+		processorGroups[payment.Processor] = append(processorGroups[payment.Processor], payment)
+	}
+
+	for processor, groupedPayments := range processorGroups {
+		timelineKey := processedPaymentsPrefix + ":" + string(processor) + ":timeline"
+		statsKey := processedPaymentsPrefix + ":" + string(processor) + ":stats"
+		
+		count := int64(len(groupedPayments))
+		var totalAmount float64
+
+		for _, payment := range groupedPayments {
+			timestamp, exists := timestampCache[payment.RequestedAt]
+			if !exists {
+				parsedTime, err := time.Parse(time.RFC3339, payment.RequestedAt)
+				if err != nil {
+					continue
+				}
+				timestamp = parsedTime.UnixMilli()
+				timestampCache[payment.RequestedAt] = timestamp
+			}
+
+			sb := strBuilderPool.Get().(*strings.Builder)
+			sb.Reset()
+			sb.Grow(32)
+			sb.WriteString(strconv.FormatFloat(payment.Amount, 'f', 2, 64))
+			sb.WriteByte(':')
+			sb.WriteString(payment.CorrelationID)
+			member := sb.String()
+			strBuilderPool.Put(sb)
+
+			pipe.ZAddNX(r.ctx, timelineKey, redis.Z{
+				Score:  float64(timestamp),
+				Member: member,
+			})
+			
+			totalAmount += payment.Amount
 		}
 
-		timelineKey := fmt.Sprintf("%s:%s:timeline", processedPaymentsPrefix, payment.Processor)
-		statsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, payment.Processor)
-
-		pipe.ZAddNX(r.ctx, timelineKey, redis.Z{
-			Score:  float64(timestamp.UnixMilli()),
-			Member: fmt.Sprintf("%.2f:%s", payment.Amount, payment.CorrelationID),
-		})
-		pipe.HIncrBy(r.ctx, statsKey, "count", 1)
-		pipe.HIncrByFloat(r.ctx, statsKey, "total", payment.Amount)
+		pipe.HIncrBy(r.ctx, statsKey, "count", count)
+		pipe.HIncrByFloat(r.ctx, statsKey, "total", totalAmount)
 	}
 
 	execStart := time.Now()
@@ -259,7 +299,7 @@ func (r *PaymentRepository) saveBatch(payments []BatchPayment) error {
 }
 
 func (r *PaymentRepository) Find(processor types.Processor, fromTime, toTime *int64) (*types.PaymentSummary, error) {
-	statsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, processor)
+	statsKey := processedPaymentsPrefix + ":" + string(processor) + ":stats"
 
 	if fromTime == nil && toTime == nil {
 		results, err := r.redisClient.HMGet(r.ctx, statsKey, "count", "total")
@@ -288,7 +328,7 @@ func (r *PaymentRepository) Find(processor types.Processor, fromTime, toTime *in
 		}, nil
 	}
 
-	timelineKey := fmt.Sprintf("%s:%s:timeline", processedPaymentsPrefix, processor)
+	timelineKey := processedPaymentsPrefix + ":" + string(processor) + ":timeline"
 	min := "0"
 	max := "+inf"
 
@@ -331,8 +371,8 @@ func (r *PaymentRepository) Find(processor types.Processor, fromTime, toTime *in
 
 func (r *PaymentRepository) FindAll(fromTime, toTime *int64) (*types.PaymentSummaryResponse, error) {
 	if fromTime == nil && toTime == nil {
-		defaultStatsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, types.ProcessorDefault)
-		fallbackStatsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, types.ProcessorFallback)
+		defaultStatsKey := processedPaymentsPrefix + ":" + string(types.ProcessorDefault) + ":stats"
+		fallbackStatsKey := processedPaymentsPrefix + ":" + string(types.ProcessorFallback) + ":stats"
 
 		pipe := r.redisClient.Pipeline()
 		pipe.HMGet(r.ctx, defaultStatsKey, "count", "total")
@@ -355,8 +395,8 @@ func (r *PaymentRepository) FindAll(fromTime, toTime *int64) (*types.PaymentSumm
 		}, nil
 	}
 
-	defaultTimelineKey := fmt.Sprintf("%s:%s:timeline", processedPaymentsPrefix, types.ProcessorDefault)
-	fallbackTimelineKey := fmt.Sprintf("%s:%s:timeline", processedPaymentsPrefix, types.ProcessorFallback)
+	defaultTimelineKey := processedPaymentsPrefix + ":" + string(types.ProcessorDefault) + ":timeline"
+	fallbackTimelineKey := processedPaymentsPrefix + ":" + string(types.ProcessorFallback) + ":timeline"
 
 	min := "0"
 	max := "+inf"
