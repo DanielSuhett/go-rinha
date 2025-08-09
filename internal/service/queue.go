@@ -11,10 +11,8 @@ import (
 )
 
 type QueueService struct {
-	queue                 []string
-	priorityQueue         []string
-	queueMutex            sync.RWMutex
-	priorityMutex         sync.RWMutex
+	queue                 chan string
+	priorityQueue         chan string
 	duplicateTracker      sync.Map
 	config                *config.Config
 	ctx                   context.Context
@@ -34,8 +32,8 @@ func NewQueueService(config *config.Config) *QueueService {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	q := &QueueService{
-		queue:         make([]string, 0, 17000),
-		priorityQueue: make([]string, 0, 1000),
+		queue:         make(chan string, 17000),
+		priorityQueue: make(chan string, 1000),
 		config:        config,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -58,30 +56,36 @@ func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
 }
 
 func (q *QueueService) Add(item []byte) {
+	start := time.Now()
 	itemStr := string(item)
-	
-	q.queueMutex.Lock()
-	q.queue = append(q.queue, itemStr)
-	q.queueMutex.Unlock()
+
+	select {
+	case q.queue <- itemStr:
+	default:
+		log.Printf("queue full")
+	}
+
+	addDuration := time.Since(start)
+	if addDuration >= time.Millisecond {
+		log.Printf("PERF: Add() took %v", addDuration)
+	}
 }
 
 func (q *QueueService) Requeue(item string) {
-	q.priorityMutex.Lock()
-	if len(q.priorityQueue) < cap(q.priorityQueue) {
-		q.priorityQueue = append(q.priorityQueue, item)
-		q.priorityMutex.Unlock()
-		return
+	select {
+	case q.priorityQueue <- item:
+	default:
+		select {
+		case q.queue <- item:
+		default:
+			log.Printf("queue full")
+		}
 	}
-	q.priorityMutex.Unlock()
-
-	q.queueMutex.Lock()
-	q.queue = append(q.queue, item)
-	q.queueMutex.Unlock()
 }
 
 func (q *QueueService) Start() {
 	atomic.StoreInt32(&q.isProcessing, 1)
-	
+
 	for i := 0; i < q.config.WorkerCount; i++ {
 		q.workers.Add(1)
 		go q.startWorker(i)
@@ -91,28 +95,18 @@ func (q *QueueService) Start() {
 func (q *QueueService) Stop() {
 	atomic.StoreInt32(&q.isProcessing, 0)
 	q.cancel()
+	close(q.queue)
+	close(q.priorityQueue)
 	q.workers.Wait()
 }
 
 func (q *QueueService) Size() int {
-	q.priorityMutex.RLock()
-	prioritySize := len(q.priorityQueue)
-	q.priorityMutex.RUnlock()
-	
-	q.queueMutex.RLock()
-	queueSize := len(q.queue)
-	q.queueMutex.RUnlock()
-	
-	return prioritySize + queueSize
+	return len(q.queue) + len(q.priorityQueue)
 }
 
 func (q *QueueService) startWorker(_ int) {
 	defer q.workers.Done()
-	
-	backoffTime := 500 * time.Microsecond
-	maxBackoff := 50 * time.Millisecond
-	emptyCount := 0
-	
+
 	for atomic.LoadInt32(&q.isProcessing) == 1 {
 		select {
 		case <-q.ctx.Done():
@@ -120,28 +114,16 @@ func (q *QueueService) startWorker(_ int) {
 		default:
 			if q.healthChecker != nil && q.healthChecker.GetCurrentColor() == types.ColorRed {
 				time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
-				emptyCount = 0
-				backoffTime = 500 * time.Microsecond
 				continue
 			}
-			
+
 			batch := q.popBatch(q.config.BatchSize)
-			
+
 			if len(batch) == 0 {
-				emptyCount++
-				if emptyCount > 5 {
-					time.Sleep(backoffTime)
-					if backoffTime < maxBackoff {
-						backoffTime = min(backoffTime*2, maxBackoff)
-					}
-				} else {
-					time.Sleep(100 * time.Microsecond)
-				}
+				time.Sleep(time.Millisecond)
 				continue
 			}
-			
-			emptyCount = 0
-			backoffTime = 500 * time.Microsecond
+
 			q.processBatch(batch)
 		}
 	}
@@ -153,30 +135,22 @@ func (q *QueueService) popBatch(maxCount int) []string {
 	}
 
 	batch := make([]string, 0, maxCount)
+	timeout := time.After(5 * time.Millisecond)
 
-	q.priorityMutex.Lock()
-	priorityLen := len(q.priorityQueue)
-	if priorityLen > 0 {
-		takeFromPriority := min(priorityLen, maxCount)
-		
-		batch = append(batch, q.priorityQueue[:takeFromPriority]...)
-		copy(q.priorityQueue, q.priorityQueue[takeFromPriority:])
-		q.priorityQueue = q.priorityQueue[:priorityLen-takeFromPriority]
-		maxCount -= takeFromPriority
-	}
-	q.priorityMutex.Unlock()
-
-	if maxCount > 0 {
-		q.queueMutex.Lock()
-		queueLen := len(q.queue)
-		if queueLen > 0 {
-			takeFromQueue := min(queueLen, maxCount)
-			
-			batch = append(batch, q.queue[:takeFromQueue]...)
-			copy(q.queue, q.queue[takeFromQueue:])
-			q.queue = q.queue[:queueLen-takeFromQueue]
+	for len(batch) < maxCount {
+		select {
+		case item := <-q.priorityQueue:
+			batch = append(batch, item)
+		case item := <-q.queue:
+			batch = append(batch, item)
+		case <-timeout:
+			return batch
+		default:
+			if len(batch) > 0 {
+				return batch
+			}
+			return nil
 		}
-		q.queueMutex.Unlock()
 	}
 
 	return batch
