@@ -6,20 +6,24 @@ import (
 	"go-rinha/internal/types"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type QueueService struct {
-	queue                 chan string
-	priorityQueue         chan string
+	queue                 []string
+	priorityQueue         []string
+	queueMutex            sync.RWMutex
+	priorityMutex         sync.RWMutex
 	duplicateTracker      sync.Map
 	config                *config.Config
 	ctx                   context.Context
 	cancel                context.CancelFunc
 	paymentProcessor      func(string) error
 	paymentBatchProcessor func([]string) error
-	isProcessing          bool
+	isProcessing          int32
 	healthChecker         HealthChecker
+	workers               sync.WaitGroup
 }
 
 type HealthChecker interface {
@@ -30,8 +34,8 @@ func NewQueueService(config *config.Config) *QueueService {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	q := &QueueService{
-		queue:         make(chan string, 17000),
-		priorityQueue: make(chan string, 1000),
+		queue:         make([]string, 0, 17000),
+		priorityQueue: make([]string, 0, 1000),
 		config:        config,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -54,75 +58,93 @@ func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
 }
 
 func (q *QueueService) Add(item []byte) {
-	select {
-	case q.queue <- string(item):
-	default:
-		log.Printf("queue full")
-	}
+	itemStr := string(item)
+	
+	q.queueMutex.Lock()
+	q.queue = append(q.queue, itemStr)
+	q.queueMutex.Unlock()
 }
 
 func (q *QueueService) Requeue(item string) {
-	select {
-	case q.priorityQueue <- item:
-	default:
-		select {
-		case q.queue <- item:
-		default:
-			log.Printf("queue full")
-		}
+	q.priorityMutex.Lock()
+	if len(q.priorityQueue) < cap(q.priorityQueue) {
+		q.priorityQueue = append(q.priorityQueue, item)
+		q.priorityMutex.Unlock()
+		return
 	}
+	q.priorityMutex.Unlock()
+
+	q.queueMutex.Lock()
+	q.queue = append(q.queue, item)
+	q.queueMutex.Unlock()
 }
 
 func (q *QueueService) Start() {
-	q.isProcessing = true
-	go q.startProcessing()
+	atomic.StoreInt32(&q.isProcessing, 1)
+	
+	for i := 0; i < q.config.WorkerCount; i++ {
+		q.workers.Add(1)
+		go q.startWorker(i)
+	}
 }
 
 func (q *QueueService) Stop() {
-	q.isProcessing = false
+	atomic.StoreInt32(&q.isProcessing, 0)
 	q.cancel()
-	close(q.queue)
-	close(q.priorityQueue)
+	q.workers.Wait()
 }
 
 func (q *QueueService) Size() int {
-	return len(q.queue) + len(q.priorityQueue)
+	q.priorityMutex.RLock()
+	prioritySize := len(q.priorityQueue)
+	q.priorityMutex.RUnlock()
+	
+	q.queueMutex.RLock()
+	queueSize := len(q.queue)
+	q.queueMutex.RUnlock()
+	
+	return prioritySize + queueSize
 }
 
-func (q *QueueService) startProcessing() {
-	for q.isProcessing {
+func (q *QueueService) startWorker(_ int) {
+	defer q.workers.Done()
+	
+	backoffTime := 500 * time.Microsecond
+	maxBackoff := 50 * time.Millisecond
+	emptyCount := 0
+	
+	for atomic.LoadInt32(&q.isProcessing) == 1 {
 		select {
 		case <-q.ctx.Done():
 			return
 		default:
-			q.processBatch()
+			if q.healthChecker != nil && q.healthChecker.GetCurrentColor() == types.ColorRed {
+				time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
+				emptyCount = 0
+				backoffTime = 500 * time.Microsecond
+				continue
+			}
+			
+			batch := q.popBatch(q.config.BatchSize)
+			
+			if len(batch) == 0 {
+				emptyCount++
+				if emptyCount > 5 {
+					time.Sleep(backoffTime)
+					if backoffTime < maxBackoff {
+						backoffTime = min(backoffTime*2, maxBackoff)
+					}
+				} else {
+					time.Sleep(100 * time.Microsecond)
+				}
+				continue
+			}
+			
+			emptyCount = 0
+			backoffTime = 500 * time.Microsecond
+			q.processBatch(batch)
 		}
 	}
-}
-
-func (q *QueueService) processBatch() {
-	if q.healthChecker != nil {
-		currentColor := q.healthChecker.GetCurrentColor()
-		if currentColor == types.ColorRed {
-			time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
-			return
-		}
-	}
-
-	start := time.Now()
-	batch := q.popBatch(q.config.BatchSize)
-	popDuration := time.Since(start)
-
-	if len(batch) == 0 {
-		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
-		return
-	}
-
-	if popDuration >= time.Millisecond {
-		log.Printf("PERF: PopBatch(%d items) took %v", len(batch), popDuration)
-	}
-
-	go q.processBatchAsync(batch)
 }
 
 func (q *QueueService) popBatch(maxCount int) []string {
@@ -131,29 +153,45 @@ func (q *QueueService) popBatch(maxCount int) []string {
 	}
 
 	batch := make([]string, 0, maxCount)
-	timeout := time.After(10 * time.Millisecond)
 
-	for len(batch) < maxCount {
-		select {
-		case item := <-q.priorityQueue:
-			batch = append(batch, item)
-		case item := <-q.queue:
-			batch = append(batch, item)
-		case <-timeout:
-			return batch
-		default:
-			if len(batch) > 0 {
-				return batch
-			}
-			return nil
+	q.priorityMutex.Lock()
+	priorityLen := len(q.priorityQueue)
+	if priorityLen > 0 {
+		takeFromPriority := min(priorityLen, maxCount)
+		
+		batch = append(batch, q.priorityQueue[:takeFromPriority]...)
+		copy(q.priorityQueue, q.priorityQueue[takeFromPriority:])
+		q.priorityQueue = q.priorityQueue[:priorityLen-takeFromPriority]
+		maxCount -= takeFromPriority
+	}
+	q.priorityMutex.Unlock()
+
+	if maxCount > 0 {
+		q.queueMutex.Lock()
+		queueLen := len(q.queue)
+		if queueLen > 0 {
+			takeFromQueue := min(queueLen, maxCount)
+			
+			batch = append(batch, q.queue[:takeFromQueue]...)
+			copy(q.queue, q.queue[takeFromQueue:])
+			q.queue = q.queue[:queueLen-takeFromQueue]
 		}
+		q.queueMutex.Unlock()
 	}
 
 	return batch
 }
 
-func (q *QueueService) processBatchAsync(batch []string) {
-	batchStart := time.Now()
+func (q *QueueService) processBatch(batch []string) {
+	if q.healthChecker != nil {
+		currentColor := q.healthChecker.GetCurrentColor()
+		if currentColor == types.ColorRed {
+			for _, item := range batch {
+				q.Requeue(item)
+			}
+			return
+		}
+	}
 
 	if q.paymentBatchProcessor != nil {
 		if err := q.paymentBatchProcessor(batch); err != nil {
@@ -165,11 +203,6 @@ func (q *QueueService) processBatchAsync(batch []string) {
 			wg.Add(1)
 			go func(item string) {
 				defer wg.Done()
-
-				batchDuration := time.Since(batchStart)
-				if batchDuration >= time.Millisecond {
-					log.Printf("PERF: ProcessBatchAsync(%d items) took %v", len(batch), batchDuration)
-				}
 				if err := q.paymentProcessor(item); err != nil {
 					log.Printf("Payment processing error: %v", err)
 					q.Requeue(item)

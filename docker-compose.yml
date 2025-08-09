@@ -17,7 +17,7 @@ services:
       resources:
         limits:
           cpus: "0.20"
-          memory: "100MB"
+          memory: "50MB"
   api1:
     build:
       context: .
@@ -38,6 +38,7 @@ services:
       - HEALTH_INTERVAL=6000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
       - BATCH_SIZE=25
+      - WORKER_COUNT=2
       - GOGC=off
     networks:
       - backend
@@ -49,7 +50,7 @@ services:
       resources:
         limits:
           cpus: "0.50"
-          memory: "100MB"
+          memory: "125MB"
   api2:
     build:
       context: .
@@ -70,6 +71,7 @@ services:
       - HEALTH_INTERVAL=3000
       - LATENCY_DIFF_TO_USE_FALLBACK=5000
       - BATCH_SIZE=25
+      - WORKER_COUNT=2
       - GOGC=off
     networks:
       - backend
@@ -81,7 +83,7 @@ services:
       resources:
         limits:
           cpus: "0.50"
-          memory: "100MB"
+          memory: "125MB"
   redis:
     image: valkey/valkey:7.2-alpine
     container_name: go-rinha-redis

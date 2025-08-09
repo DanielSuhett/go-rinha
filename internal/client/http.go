@@ -30,7 +30,7 @@ func NewHTTPClient() *HTTPClient {
 	return &HTTPClient{
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   1 * time.Second,
+			Timeout:   5 * time.Second,
 		},
 	}
 }
