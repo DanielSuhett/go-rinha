@@ -2,12 +2,12 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"go-rinha/internal/config"
 	"go-rinha/internal/types"
 	"log"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 type QueueService struct {
@@ -16,7 +16,7 @@ type QueueService struct {
 	config           *config.Config
 	ctx              context.Context
 	cancel           context.CancelFunc
-	paymentProcessor func(string) error
+	paymentProcessor func([]byte) error
 	isProcessing     bool
 	healthChecker    HealthChecker
 }
@@ -40,7 +40,7 @@ func NewQueueService(config *config.Config) *QueueService {
 	return q
 }
 
-func (q *QueueService) SetPaymentProcessor(processor func(string) error) {
+func (q *QueueService) SetPaymentProcessor(processor func([]byte) error) {
 	q.paymentProcessor = processor
 }
 
@@ -48,25 +48,61 @@ func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
 	q.healthChecker = healthChecker
 }
 
-func (q *QueueService) Add(item string) {
-	var payment types.PaymentRequest
-	if err := json.Unmarshal([]byte(item), &payment); err != nil {
-		log.Printf("Failed to parse payment for duplicate check: %v", err)
+func (q *QueueService) Add(item []byte) {
+	correlationID := extractCorrelationID(item)
+	if _, exists := q.duplicateTracker.LoadOrStore(correlationID, time.Now().Unix()); exists {
 		return
 	}
 
-	if _, exists := q.duplicateTracker.LoadOrStore(payment.CorrelationID, time.Now().Unix()); exists {
-		log.Printf("Duplicate payment ignored: %s", payment.CorrelationID)
-		return
-	}
-
-	if !q.fastQueue.Push([]byte(item)) {
+	if !q.fastQueue.Push(item) {
 		log.Printf("Failed to push item to queue: queue full")
 	}
 }
 
-func (q *QueueService) Requeue(item string) {
-	if !q.fastQueue.PushFront([]byte(item)) {
+func extractCorrelationID(data []byte) string {
+	s := *(*string)(unsafe.Pointer(&data))
+
+	start := findCorrelationIDStart(s)
+	if start == -1 {
+		return ""
+	}
+
+	end := findCorrelationIDEnd(s, start)
+	if end == -1 {
+		return ""
+	}
+
+	return s[start:end]
+}
+
+func findCorrelationIDStart(s string) int {
+	const pattern = `"correlationId":"`
+	for i := 0; i <= len(s)-len(pattern); i++ {
+		match := true
+		for j := 0; j < len(pattern); j++ {
+			if s[i+j] != pattern[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i + len(pattern)
+		}
+	}
+	return -1
+}
+
+func findCorrelationIDEnd(s string, start int) int {
+	for i := start; i < len(s); i++ {
+		if s[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+func (q *QueueService) Requeue(item []byte) {
+	if !q.fastQueue.PushFront(item) {
 		log.Printf("Failed to requeue item: queue full")
 	}
 }
@@ -93,7 +129,7 @@ func (q *QueueService) startProcessing() {
 }
 
 func (q *QueueService) processBatch() {
-	if q.healthChecker != nil && !q.config.CheatMode {
+	if q.healthChecker != nil {
 		currentColor := q.healthChecker.GetCurrentColor()
 		if currentColor == types.ColorRed {
 			time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
@@ -109,9 +145,9 @@ func (q *QueueService) processBatch() {
 
 	for i, item := range batchBytes {
 		if q.paymentProcessor != nil {
-			if err := q.paymentProcessor(string(item)); err != nil {
+			if err := q.paymentProcessor(item); err != nil {
 				log.Printf("Payment processing error: %v", err)
-				q.Requeue(string(item))
+				q.Requeue(item)
 			}
 		}
 		if i < len(batchBytes)-1 && len(batchBytes) > 1 {

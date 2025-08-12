@@ -24,11 +24,7 @@ func NewPaymentService(circuitBreaker *health.Checker, queueService *QueueServic
 	}
 }
 
-func (p *PaymentService) ProcessPayment(data string) error {
-	if p.config.CheatMode {
-		return p.repository.Send(types.ProcessorDefault, data, p.circuitBreaker, p.queueService)
-	}
-
+func (p *PaymentService) ProcessPayment(data []byte) error {
 	currentColor := p.circuitBreaker.GetCurrentColor()
 
 	switch currentColor {
@@ -40,7 +36,7 @@ func (p *PaymentService) ProcessPayment(data string) error {
 	case types.ColorYellow:
 		return p.repository.Send(types.ProcessorFallback, data, p.circuitBreaker, p.queueService)
 	}
-	
+
 	return nil
 }
 

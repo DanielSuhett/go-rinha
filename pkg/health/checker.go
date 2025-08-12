@@ -44,9 +44,6 @@ func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, 
 }
 
 func (c *Checker) Start() {
-	if c.config.CheatMode {
-		return
-	}
 	if !c.config.IsMaster() {
 		go c.subscribeToColorChanges()
 	}
@@ -63,17 +60,10 @@ func (c *Checker) Stop() {
 }
 
 func (c *Checker) GetCurrentColor() types.CircuitBreakerColor {
-	if c.config.CheatMode {
-		return types.ColorGreen
-	}
 	return c.currentColor.Load().(types.CircuitBreakerColor)
 }
 
 func (c *Checker) SignalFailure(processor types.Processor) types.CircuitBreakerColor {
-	if c.config.CheatMode {
-		return types.ColorGreen
-	}
-
 	log.Printf("Signal failure for %s", processor)
 	c.setColor(types.ColorRed)
 

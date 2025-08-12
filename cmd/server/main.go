@@ -127,21 +127,29 @@ func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *FastHTTPServer) handlePayments(ctx *fasthttp.RequestCtx) {
+	// start := time.Now()
+	// defer func() {
+	// 	elapsed := time.Since(start)
+	// 	if elapsed >= 70*time.Microsecond {
+	// 		log.Printf("[PERF]: Add took: %v", elapsed)
+	// 	}
+	// }()
+
 	body := ctx.Request.Body()
 	if len(body) == 0 {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 		return
 	}
 
-	go func(body []byte) {
-		bodyStr := string(body)
-		s.queueService.Add(bodyStr)
-	}(body)
+	nb := make([]byte, len(body))
+	copy(nb, body)
+	s.queueService.Add(nb)
 
 	ctx.SetStatusCode(fasthttp.StatusCreated)
 }
 
 func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
+	time.Sleep(100 * time.Millisecond)
 	var fromTime, toTime *int64
 
 	if fromBytes := ctx.QueryArgs().Peek("from"); fromBytes != nil {

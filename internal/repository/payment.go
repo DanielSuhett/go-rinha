@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	redisClient "go-rinha/pkg/redis"
 
@@ -38,9 +39,17 @@ func NewPaymentRepository(httpClient *client.HTTPClient, redisClient *redisClien
 	}
 }
 
-func (r *PaymentRepository) Send(processor types.Processor, data string, circuitBreaker interface {
+func UnsafeBytes(s string) []byte {
+	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
+
+func UnsafeString(b []byte) string {
+	return *(*string)(unsafe.Pointer(&b))
+}
+
+func (r *PaymentRepository) Send(processor types.Processor, data []byte, circuitBreaker interface {
 	SignalFailure(types.Processor) types.CircuitBreakerColor
-}, queueService interface{ Requeue(string) },
+}, queueService interface{ Requeue([]byte) },
 ) error {
 	payment, err := r.parsePaymentWithTimestamp(data)
 	if err != nil {
@@ -60,7 +69,7 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 			queueService.Requeue(data)
 			return nil
 		}
-		log.Printf("Request error with processor %s: %v", processor, err)
+		log.Printf("Request error with processor %s", processor)
 		circuitBreaker.SignalFailure(processor)
 		queueService.Requeue(data)
 		return nil
@@ -88,14 +97,14 @@ func (r *PaymentRepository) Send(processor types.Processor, data string, circuit
 	return nil
 }
 
-func (r *PaymentRepository) parsePaymentWithTimestamp(data string) (*types.PaymentRequest, error) {
+func (r *PaymentRepository) parsePaymentWithTimestamp(data []byte) (*types.PaymentRequest, error) {
 	var payment types.PaymentRequest
-	
+
 	buffer := pool.GetByteBuffer()
 	defer pool.PutByteBuffer(buffer)
-	
+
 	buffer = append(buffer, data...)
-	
+
 	if err := sonic.ConfigFastest.Unmarshal(buffer, &payment); err != nil {
 		return nil, err
 	}
