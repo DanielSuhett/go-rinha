@@ -116,6 +116,7 @@ func (r *PaymentRepository) parsePaymentWithTimestamp(data []byte) (*types.Payme
 	return &payment, nil
 }
 
+// TODO: improve this
 func (r *PaymentRepository) save(processor types.Processor, amount float64, correlationID, requestedAt string) error {
 	timestamp, err := time.Parse(time.RFC3339, requestedAt)
 	if err != nil {
@@ -210,6 +211,7 @@ func (r *PaymentRepository) Find(processor types.Processor, fromTime, toTime *in
 }
 
 func (r *PaymentRepository) FindAll(fromTime, toTime *int64) (*types.PaymentSummaryResponse, error) {
+	time.Sleep(100 * time.Millisecond)
 	if fromTime == nil && toTime == nil {
 		defaultStatsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, types.ProcessorDefault)
 		fallbackStatsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, types.ProcessorFallback)

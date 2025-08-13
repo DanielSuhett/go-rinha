@@ -7,7 +7,6 @@ import (
 	"log"
 	"sync"
 	"time"
-	"unsafe"
 )
 
 type QueueService struct {
@@ -49,56 +48,9 @@ func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
 }
 
 func (q *QueueService) Add(item []byte) {
-	correlationID := extractCorrelationID(item)
-	if _, exists := q.duplicateTracker.LoadOrStore(correlationID, time.Now().Unix()); exists {
-		return
-	}
-
 	if !q.fastQueue.Push(item) {
 		log.Printf("Failed to push item to queue: queue full")
 	}
-}
-
-func extractCorrelationID(data []byte) string {
-	s := *(*string)(unsafe.Pointer(&data))
-
-	start := findCorrelationIDStart(s)
-	if start == -1 {
-		return ""
-	}
-
-	end := findCorrelationIDEnd(s, start)
-	if end == -1 {
-		return ""
-	}
-
-	return s[start:end]
-}
-
-func findCorrelationIDStart(s string) int {
-	const pattern = `"correlationId":"`
-	for i := 0; i <= len(s)-len(pattern); i++ {
-		match := true
-		for j := 0; j < len(pattern); j++ {
-			if s[i+j] != pattern[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return i + len(pattern)
-		}
-	}
-	return -1
-}
-
-func findCorrelationIDEnd(s string, start int) int {
-	for i := start; i < len(s); i++ {
-		if s[i] == '"' {
-			return i
-		}
-	}
-	return -1
 }
 
 func (q *QueueService) Requeue(item []byte) {
@@ -129,17 +81,14 @@ func (q *QueueService) startProcessing() {
 }
 
 func (q *QueueService) processBatch() {
-	if q.healthChecker != nil {
-		currentColor := q.healthChecker.GetCurrentColor()
-		if currentColor == types.ColorRed {
-			time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
-			return
-		}
+	currentColor := q.healthChecker.GetCurrentColor()
+	if currentColor == types.ColorRed {
+		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
+		return
 	}
 
 	batchBytes := q.fastQueue.PopBatch(q.config.BatchSize)
 	if len(batchBytes) == 0 {
-		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
 		return
 	}
 

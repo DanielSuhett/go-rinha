@@ -77,13 +77,13 @@ func main() {
 		IdleTimeout:        30 * time.Second,
 		DisableKeepalive:   false,
 		MaxRequestBodySize: 1024,
+		TCPKeepalive:       true,
 	}
 
 	circuitBreaker.Start()
 	queueService.Start()
 
 	go func() {
-		log.Printf("FastHTTP server listening on Unix socket: %s", socketPath)
 		if err := fastHTTPServer.Serve(listener); err != nil {
 			log.Fatalf("Server failed to start: %v", err)
 		}
@@ -92,8 +92,6 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-
-	log.Println("Shutting down gracefully...")
 
 	circuitBreaker.Stop()
 	queueService.Stop()
@@ -104,52 +102,33 @@ func main() {
 
 	os.Remove(socketPath)
 	redisClient.Close()
-	log.Println("Server stopped")
 }
 
 func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
-	path := string(ctx.Path())
-
-	switch path {
-	case "/payments":
-		if !ctx.IsPost() {
-			ctx.SetStatusCode(fasthttp.StatusMethodNotAllowed)
-			return
-		}
-		s.handlePayments(ctx)
-	case "/payments-summary":
-		s.handlePaymentsSummary(ctx)
-	case "/health":
-		s.handleHealth(ctx)
-	default:
-		ctx.SetStatusCode(fasthttp.StatusNotFound)
-	}
-}
-
-func (s *FastHTTPServer) handlePayments(ctx *fasthttp.RequestCtx) {
 	// start := time.Now()
 	// defer func() {
 	// 	elapsed := time.Since(start)
-	// 	if elapsed >= 70*time.Microsecond {
+	// 	if elapsed >= 20*time.Microsecond && ctx.Method()[0] == 'P' {
 	// 		log.Printf("[PERF]: Add took: %v", elapsed)
 	// 	}
 	// }()
 
-	body := ctx.Request.Body()
-	if len(body) == 0 {
-		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+	if len(ctx.Path()) == 9 {
+		body := ctx.Request.SwapBody(nil)
+		s.queueService.Add(body)
+		ctx.SetStatusCode(fasthttp.StatusCreated)
 		return
 	}
 
-	nb := make([]byte, len(body))
-	copy(nb, body)
-	s.queueService.Add(nb)
+	if len(ctx.Path()) == 17 {
+		s.handlePaymentsSummary(ctx)
+		return
+	}
 
-	ctx.SetStatusCode(fasthttp.StatusCreated)
+	ctx.SetStatusCode(fasthttp.StatusOK)
 }
 
 func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
-	time.Sleep(100 * time.Millisecond)
 	var fromTime, toTime *int64
 
 	if fromBytes := ctx.QueryArgs().Peek("from"); fromBytes != nil {
@@ -165,7 +144,6 @@ func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
 			toTime = &timestamp
 		}
 	}
-
 	result, err := s.paymentService.GetPaymentSummary(fromTime, toTime)
 	if err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
@@ -180,10 +158,4 @@ func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
 
 	ctx.SetContentType("application/json")
 	ctx.Write(responseData)
-}
-
-func (s *FastHTTPServer) handleHealth(ctx *fasthttp.RequestCtx) {
-	ctx.SetContentType("application/json")
-	ctx.SetStatusCode(fasthttp.StatusOK)
-	ctx.WriteString(`{"status":"ok"}`)
 }
