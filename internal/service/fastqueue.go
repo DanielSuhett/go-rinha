@@ -1,13 +1,22 @@
 package service
 
 import (
+	"sync"
 	"sync/atomic"
 )
+
+var batchPool = sync.Pool{
+	New: func() interface{} {
+		return make([][]byte, 0, 64)
+	},
+}
 
 type FastQueue struct {
 	buffer [][]byte
 	head   uint64
+	_pad1  [7]uint64
 	tail   uint64
+	_pad2  [7]uint64
 	mask   uint64
 }
 
@@ -23,16 +32,19 @@ func NewFastQueue(size int) *FastQueue {
 }
 
 func (q *FastQueue) Push(data []byte) bool {
-	head := atomic.LoadUint64(&q.head)
-	next := head + 1
+	for {
+		head := atomic.LoadUint64(&q.head)
+		next := head + 1
 
-	if next&q.mask == atomic.LoadUint64(&q.tail)&q.mask {
-		return false
+		if next&q.mask == atomic.LoadUint64(&q.tail)&q.mask {
+			return false
+		}
+
+		if atomic.CompareAndSwapUint64(&q.head, head, next) {
+			q.buffer[head&q.mask] = data
+			return true
+		}
 	}
-
-	q.buffer[head&q.mask] = data
-	atomic.StoreUint64(&q.head, next)
-	return true
 }
 
 func (q *FastQueue) PushFront(data []byte) bool {
@@ -79,13 +91,24 @@ func (q *FastQueue) PopBatch(maxCount int) [][]byte {
 		available = maxCount
 	}
 
-	batch := make([][]byte, available)
+	batch := batchPool.Get().([][]byte)[:0]
+	if cap(batch) < available {
+		batchPool.Put(batch)
+		batch = make([][]byte, 0, available)
+	}
+
 	for i := 0; i < available; i++ {
-		batch[i] = q.buffer[(tail+uint64(i))&q.mask]
+		batch = append(batch, q.buffer[(tail+uint64(i))&q.mask])
 	}
 
 	atomic.StoreUint64(&q.tail, tail+uint64(available))
 	return batch
+}
+
+func (q *FastQueue) ReleaseBatch(batch [][]byte) {
+	if batch != nil && cap(batch) <= 256 {
+		batchPool.Put(batch)
+	}
 }
 
 func (q *FastQueue) Size() int {

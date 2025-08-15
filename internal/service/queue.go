@@ -81,16 +81,20 @@ func (q *QueueService) startProcessing() {
 }
 
 func (q *QueueService) processBatch() {
-	currentColor := q.healthChecker.GetCurrentColor()
-	if currentColor == types.ColorRed {
-		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
-		return
+	if q.healthChecker != nil {
+		currentColor := q.healthChecker.GetCurrentColor()
+		if currentColor == types.ColorRed {
+			time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
+			return
+		}
 	}
 
 	batchBytes := q.fastQueue.PopBatch(q.config.BatchSize)
 	if len(batchBytes) == 0 {
+		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
 		return
 	}
+	defer q.fastQueue.ReleaseBatch(batchBytes)
 
 	for i, item := range batchBytes {
 		if q.paymentProcessor != nil {

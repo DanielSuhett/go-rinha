@@ -2,9 +2,7 @@ package client
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"go-rinha/internal/types"
 	"io"
 	"net/http"
 	"time"
@@ -30,17 +28,12 @@ func NewHTTPClient() *HTTPClient {
 	return &HTTPClient{
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   3 * time.Second,
+			Timeout:   1 * time.Second,
 		},
 	}
 }
 
-func (h *HTTPClient) PostPayment(url string, payment *types.PaymentRequest) (int, error) {
-	jsonData, err := json.Marshal(payment)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal payment: %w", err)
-	}
-
+func (h *HTTPClient) PostPayment(url string, jsonData []byte) (int, error) {
 	resp, err := h.client.Post(url, "application/json", bytes.NewReader(jsonData))
 	if err != nil {
 		return 0, fmt.Errorf("request failed: %w", err)

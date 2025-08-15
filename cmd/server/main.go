@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"go-rinha/internal/client"
 	"go-rinha/internal/config"
@@ -25,6 +26,7 @@ type FastHTTPServer struct {
 	paymentService *service.PaymentService
 	queueService   *service.QueueService
 	config         *config.Config
+	bodyPool       chan []byte
 }
 
 func main() {
@@ -104,23 +106,31 @@ func main() {
 	redisClient.Close()
 }
 
-func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
-	// start := time.Now()
-	// defer func() {
-	// 	elapsed := time.Since(start)
-	// 	if elapsed >= 20*time.Microsecond && ctx.Method()[0] == 'P' {
-	// 		log.Printf("[PERF]: Add took: %v", elapsed)
-	// 	}
-	// }()
+func UnsafeString(b []byte) string {
+	// #nosec G103
+	return *(*string)(unsafe.Pointer(&b))
+}
 
-	if len(ctx.Path()) == 9 {
+func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
+	start := time.Now()
+	defer func() {
+		elapsed := time.Since(start)
+		if elapsed >= 20*time.Microsecond && ctx.Method()[0] == 'P' {
+			log.Printf("[PERF]: Add took: %v", elapsed)
+		}
+	}()
+
+	path := UnsafeString(ctx.Path())
+
+	if path == "/payments" {
 		body := ctx.Request.SwapBody(nil)
 		s.queueService.Add(body)
+
 		ctx.SetStatusCode(fasthttp.StatusCreated)
 		return
 	}
 
-	if len(ctx.Path()) == 17 {
+	if path == "/payments-summary" {
 		s.handlePaymentsSummary(ctx)
 		return
 	}
@@ -129,6 +139,7 @@ func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
+	time.Sleep(100 * time.Millisecond)
 	var fromTime, toTime *int64
 
 	if fromBytes := ctx.QueryArgs().Peek("from"); fromBytes != nil {

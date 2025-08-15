@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"go-rinha/internal/client"
@@ -17,7 +18,6 @@ import (
 
 	redisClient "go-rinha/pkg/redis"
 
-	"github.com/bytedance/sonic"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -51,17 +51,14 @@ func (r *PaymentRepository) Send(processor types.Processor, data []byte, circuit
 	SignalFailure(types.Processor) types.CircuitBreakerColor
 }, queueService interface{ Requeue([]byte) },
 ) error {
-	payment, err := r.parsePaymentWithTimestamp(data)
-	if err != nil {
-		return fmt.Errorf("failed to parse payment: %w", err)
-	}
+	jsonData := r.injectRequestedAt(data)
 
 	url := r.config.GetProcessorPaymentURL(string(processor))
 	if url == "" {
 		return fmt.Errorf("invalid processor: %s", processor)
 	}
 
-	statusCode, err := r.httpClient.PostPayment(url, payment)
+	statusCode, err := r.httpClient.PostPayment(url, jsonData)
 
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -75,49 +72,110 @@ func (r *PaymentRepository) Send(processor types.Processor, data []byte, circuit
 		return nil
 	}
 
-	if statusCode == 200 || statusCode == 201 {
-		if err := r.save(processor, payment.Amount, payment.CorrelationID, payment.RequestedAt); err != nil {
-			log.Printf("Failed to save payment: %v", err)
-			return err
-		}
-	} else if statusCode == 422 {
-		log.Printf("Payment already exists (422): %s - counting as successful", payment.CorrelationID)
-		if err := r.save(processor, payment.Amount, payment.CorrelationID, payment.RequestedAt); err != nil {
-			log.Printf("Failed to save duplicate payment: %v", err)
-			return err
-		}
+	switch statusCode {
+	case 200, 201, 422:
+		go r.save(processor, jsonData)
 		return nil
-	} else {
+	default:
 		log.Printf("Non-success status %d from processor %s", statusCode, processor)
 		circuitBreaker.SignalFailure(processor)
 		queueService.Requeue(data)
 		return nil
 	}
-
-	return nil
 }
 
-func (r *PaymentRepository) parsePaymentWithTimestamp(data []byte) (*types.PaymentRequest, error) {
-	var payment types.PaymentRequest
+func (r *PaymentRepository) injectRequestedAt(data []byte) []byte {
+	if bytes.Contains(data, []byte(`"requestedAt"`)) {
+		return data
+	}
 
 	buffer := pool.GetByteBuffer()
 	defer pool.PutByteBuffer(buffer)
 
-	buffer = append(buffer, data...)
+	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	requestedAtField := `,"requestedAt":"` + timestamp + `"`
 
-	if err := sonic.ConfigFastest.Unmarshal(buffer, &payment); err != nil {
-		return nil, err
+	lastBraceIndex := bytes.LastIndexByte(data, '}')
+	if lastBraceIndex == -1 {
+		return data
 	}
 
-	if payment.RequestedAt == "" {
-		payment.RequestedAt = time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	}
+	buffer = append(buffer, data[:lastBraceIndex]...)
+	buffer = append(buffer, requestedAtField...)
+	buffer = append(buffer, data[lastBraceIndex:]...)
 
-	return &payment, nil
+	result := make([]byte, len(buffer))
+	copy(result, buffer)
+	return result
 }
 
-// TODO: improve this
-func (r *PaymentRepository) save(processor types.Processor, amount float64, correlationID, requestedAt string) error {
+func (r *PaymentRepository) extractJSONField(data []byte, field string) string {
+	fieldPattern := `"` + field + `":`
+	start := bytes.Index(data, UnsafeBytes(fieldPattern))
+	if start == -1 {
+		return ""
+	}
+
+	start += len(fieldPattern)
+	for start < len(data) && (data[start] == ' ' || data[start] == '\t') {
+		start++
+	}
+
+	if start >= len(data) || data[start] != '"' {
+		return ""
+	}
+	start++
+
+	end := start
+	for end < len(data) && data[end] != '"' {
+		if data[end] == '\\' && end+1 < len(data) {
+			end += 2
+		} else {
+			end++
+		}
+	}
+
+	if end >= len(data) {
+		return ""
+	}
+
+	return UnsafeString(data[start:end])
+}
+
+func (r *PaymentRepository) extractAmount(data []byte) float64 {
+	fieldPattern := `"amount":`
+	start := bytes.Index(data, UnsafeBytes(fieldPattern))
+	if start == -1 {
+		return 0
+	}
+
+	start += len(fieldPattern)
+	for start < len(data) && (data[start] == ' ' || data[start] == '\t') {
+		start++
+	}
+
+	end := start
+	for end < len(data) && (data[end] >= '0' && data[end] <= '9' || data[end] == '.') {
+		end++
+	}
+
+	if end <= start {
+		return 0
+	}
+
+	value, _ := strconv.ParseFloat(UnsafeString(data[start:end]), 64)
+	return value
+}
+
+func (r *PaymentRepository) extractRequestedAt(data []byte) string {
+	return r.extractJSONField(data, "requestedAt")
+}
+
+func (r *PaymentRepository) save(processor types.Processor, jsonData []byte) error {
+	correlationID := r.extractJSONField(jsonData, "correlationId")
+	amount := r.extractAmount(jsonData)
+	requestedAt := r.extractRequestedAt(jsonData)
+
 	timestamp, err := time.Parse(time.RFC3339, requestedAt)
 	if err != nil {
 		return fmt.Errorf("failed to parse timestamp: %w", err)
@@ -125,12 +183,33 @@ func (r *PaymentRepository) save(processor types.Processor, amount float64, corr
 
 	pipe := r.redisClient.Pipeline()
 
-	timelineKey := fmt.Sprintf("%s:%s:timeline", processedPaymentsPrefix, processor)
-	statsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, processor)
+	buffer := pool.GetByteBuffer()
+	defer pool.PutByteBuffer(buffer)
+
+	buffer = strconv.AppendFloat(buffer, amount, 'f', 2, 64)
+	buffer = append(buffer, ':')
+	buffer = append(buffer, UnsafeBytes(correlationID)...)
+	member := UnsafeString(buffer)
+
+	timelineKeyBytes := pool.GetByteBuffer()
+	defer pool.PutByteBuffer(timelineKeyBytes)
+	timelineKeyBytes = append(timelineKeyBytes, processedPaymentsPrefix...)
+	timelineKeyBytes = append(timelineKeyBytes, ':')
+	timelineKeyBytes = append(timelineKeyBytes, UnsafeBytes(string(processor))...)
+	timelineKeyBytes = append(timelineKeyBytes, ":timeline"...)
+	timelineKey := UnsafeString(timelineKeyBytes)
+
+	statsKeyBytes := pool.GetByteBuffer()
+	defer pool.PutByteBuffer(statsKeyBytes)
+	statsKeyBytes = append(statsKeyBytes, processedPaymentsPrefix...)
+	statsKeyBytes = append(statsKeyBytes, ':')
+	statsKeyBytes = append(statsKeyBytes, processor...)
+	statsKeyBytes = append(statsKeyBytes, ":stats"...)
+	statsKey := UnsafeString(statsKeyBytes)
 
 	pipe.ZAddNX(r.ctx, timelineKey, redis.Z{
 		Score:  float64(timestamp.UnixMilli()),
-		Member: fmt.Sprintf("%.2f:%s", amount, correlationID),
+		Member: member,
 	})
 	pipe.HIncrBy(r.ctx, statsKey, "count", 1)
 	pipe.HIncrByFloat(r.ctx, statsKey, "total", amount)
@@ -211,7 +290,6 @@ func (r *PaymentRepository) Find(processor types.Processor, fromTime, toTime *in
 }
 
 func (r *PaymentRepository) FindAll(fromTime, toTime *int64) (*types.PaymentSummaryResponse, error) {
-	time.Sleep(100 * time.Millisecond)
 	if fromTime == nil && toTime == nil {
 		defaultStatsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, types.ProcessorDefault)
 		fallbackStatsKey := fmt.Sprintf("%s:%s:stats", processedPaymentsPrefix, types.ProcessorFallback)
