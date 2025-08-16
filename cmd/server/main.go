@@ -35,7 +35,7 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	redisClient := redis.NewClient(cfg.GetRedisAddr())
+	redisClient := redis.NewClientWithConfig(cfg.GetRedisAddr(), cfg.IsRedisUDS())
 	if err := redisClient.Ping(context.Background()); err != nil {
 		log.Fatalf("Failed to connect to Redis: %v", err)
 	}
@@ -139,7 +139,7 @@ func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 }
 
 func (s *FastHTTPServer) handlePaymentsSummary(ctx *fasthttp.RequestCtx) {
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	var fromTime, toTime *int64
 
 	if fromBytes := ctx.QueryArgs().Peek("from"); fromBytes != nil {

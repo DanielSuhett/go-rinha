@@ -9,8 +9,9 @@ import (
 type Config struct {
 	AppPort                  int    `validate:"required"`
 	AppName                  string `validate:"required,oneof=1 2"`
-	RedisHost                string `validate:"required"`
-	RedisPort                int    `validate:"required"`
+	RedisHost                string
+	RedisPort                int
+	RedisSocketPath          string
 	ProcessorDefaultURL      string `validate:"required,url"`
 	ProcessorFallbackURL     string `validate:"required,url"`
 	PollingInterval          int    `validate:"required"`
@@ -26,6 +27,7 @@ func LoadConfig() (*Config, error) {
 		AppName:                  getEnv("APP_NAME", "1"),
 		RedisHost:                getEnv("REDIS_HOST", "localhost"),
 		RedisPort:                getEnvAsInt("REDIS_PORT", 6380),
+		RedisSocketPath:          getEnv("REDIS_SOCKET_PATH", ""),
 		ProcessorDefaultURL:      getEnv("PROCESSOR_DEFAULT_URL", ""),
 		ProcessorFallbackURL:     getEnv("PROCESSOR_FALLBACK_URL", ""),
 		PollingInterval:          getEnvAsInt("POOLING_INTERVAL", 2000),
@@ -43,7 +45,14 @@ func LoadConfig() (*Config, error) {
 }
 
 func (c *Config) GetRedisAddr() string {
+	if c.RedisSocketPath != "" {
+		return c.RedisSocketPath
+	}
 	return fmt.Sprintf("%s:%d", c.RedisHost, c.RedisPort)
+}
+
+func (c *Config) IsRedisUDS() bool {
+	return c.RedisSocketPath != ""
 }
 
 func (c *Config) GetRedisKeyPrefix() string {
