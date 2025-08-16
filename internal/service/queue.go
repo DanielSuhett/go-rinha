@@ -4,14 +4,25 @@ import (
 	"context"
 	"go-rinha/internal/config"
 	"go-rinha/internal/types"
+	"go-rinha/pkg/utils"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
+var batchPool = sync.Pool{
+	New: func() any {
+		batch := make([][]byte, 0, 64)
+		return &batch
+	},
+}
+
 type QueueService struct {
-	fastQueue        *FastQueue
-	duplicateTracker sync.Map
+	buffer           [][]byte
+	head             uint64
+	tail             uint64
+	mask             uint64
 	config           *config.Config
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -28,14 +39,18 @@ func NewQueueService(config *config.Config) *QueueService {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	queueSize := 1024 * 16
-	q := &QueueService{
-		fastQueue: NewFastQueue(queueSize),
-		config:    config,
-		ctx:       ctx,
-		cancel:    cancel,
+	if queueSize&(queueSize-1) != 0 {
+		queueSize = utils.NextPowerOf2(queueSize)
 	}
 
-	q.startDuplicateCleanup()
+	q := &QueueService{
+		buffer: make([][]byte, queueSize),
+		mask:   uint64(queueSize - 1),
+		config: config,
+		ctx:    ctx,
+		cancel: cancel,
+	}
+
 	return q
 }
 
@@ -47,14 +62,86 @@ func (q *QueueService) SetHealthChecker(healthChecker HealthChecker) {
 	q.healthChecker = healthChecker
 }
 
+func (q *QueueService) Push(data []byte) bool {
+	for {
+		head := atomic.LoadUint64(&q.head)
+		next := head + 1
+
+		if next&q.mask == atomic.LoadUint64(&q.tail)&q.mask {
+			return false
+		}
+
+		if atomic.CompareAndSwapUint64(&q.head, head, next) {
+			q.buffer[head&q.mask] = data
+			return true
+		}
+	}
+}
+
+func (q *QueueService) Pop() ([]byte, bool) {
+	tail := atomic.LoadUint64(&q.tail)
+	head := atomic.LoadUint64(&q.head)
+
+	if tail == head {
+		return nil, false
+	}
+
+	data := q.buffer[tail&q.mask]
+	atomic.StoreUint64(&q.tail, tail+1)
+	return data, true
+}
+
+func (q *QueueService) PopBatch(maxCount int) [][]byte {
+	if maxCount <= 0 {
+		return nil
+	}
+
+	tail := atomic.LoadUint64(&q.tail)
+	head := atomic.LoadUint64(&q.head)
+
+	available := int(head - tail)
+	if available <= 0 {
+		return nil
+	}
+
+	if available > maxCount {
+		available = maxCount
+	}
+
+	batch := (*batchPool.Get().(*[][]byte))[:0]
+	if cap(batch) < available {
+		batchPool.Put(&batch)
+		batch = make([][]byte, 0, available)
+	}
+
+	for i := 0; i < available; i++ {
+		batch = append(batch, q.buffer[(tail+uint64(i))&q.mask])
+	}
+
+	atomic.StoreUint64(&q.tail, tail+uint64(available))
+	return batch
+}
+
+func (q *QueueService) ReleaseBatch(batch [][]byte) {
+	if batch != nil && cap(batch) <= 256 {
+		batchPool.Put(&batch)
+	}
+}
+
+func (q *QueueService) Size() int {
+	head := atomic.LoadUint64(&q.head)
+	tail := atomic.LoadUint64(&q.tail)
+	return int(head - tail)
+}
+
 func (q *QueueService) Add(item []byte) {
-	if !q.fastQueue.Push(item) {
+	if !q.Push(item) {
 		log.Printf("Failed to push item to queue: queue full")
 	}
 }
 
 func (q *QueueService) Requeue(item []byte) {
-	if !q.fastQueue.PushFront(item) {
+	if !q.Push(item) {
 		log.Printf("Failed to requeue item: queue full")
 	}
 }
@@ -89,12 +176,12 @@ func (q *QueueService) processBatch() {
 		}
 	}
 
-	batchBytes := q.fastQueue.PopBatch(q.config.BatchSize)
+	batchBytes := q.PopBatch(q.config.BatchSize)
 	if len(batchBytes) == 0 {
 		time.Sleep(time.Duration(q.config.PollingInterval) * time.Millisecond)
 		return
 	}
-	defer q.fastQueue.ReleaseBatch(batchBytes)
+	defer q.ReleaseBatch(batchBytes)
 
 	for i, item := range batchBytes {
 		if q.paymentProcessor != nil {
@@ -107,28 +194,4 @@ func (q *QueueService) processBatch() {
 			time.Sleep(10 * time.Microsecond)
 		}
 	}
-}
-
-func (q *QueueService) startDuplicateCleanup() {
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-q.ctx.Done():
-				return
-			case <-ticker.C:
-				now := time.Now().Unix()
-				cutoff := now - 300
-
-				q.duplicateTracker.Range(func(key, value any) bool {
-					if timestamp, ok := value.(int64); ok && timestamp < cutoff {
-						q.duplicateTracker.Delete(key)
-					}
-					return true
-				})
-			}
-		}
-	}()
 }
