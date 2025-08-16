@@ -183,15 +183,12 @@ func (q *QueueService) processBatch() {
 	}
 	defer q.ReleaseBatch(batchBytes)
 
-	for i, item := range batchBytes {
+	for _, item := range batchBytes {
 		if q.paymentProcessor != nil {
 			if err := q.paymentProcessor(item); err != nil {
 				log.Printf("Payment processing error: %v", err)
 				q.Requeue(item)
 			}
-		}
-		if i < len(batchBytes)-1 && len(batchBytes) > 1 {
-			time.Sleep(10 * time.Microsecond)
 		}
 	}
 }
