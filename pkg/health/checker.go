@@ -186,13 +186,7 @@ func (c *Checker) calculateColor(processors map[types.Processor]*types.Processor
 	defaultHealth := processors[types.ProcessorDefault]
 	fallbackHealth := processors[types.ProcessorFallback]
 
-	diff := defaultHealth.MinResponseTime - fallbackHealth.MinResponseTime
-
 	if defaultHealth.Failing && fallbackHealth.Failing {
-		return types.ColorRed
-	}
-
-	if defaultHealth.Failing {
 		return types.ColorRed
 	}
 
@@ -200,11 +194,15 @@ func (c *Checker) calculateColor(processors map[types.Processor]*types.Processor
 		return types.ColorYellow
 	}
 
-	if defaultHealth.Failing && !fallbackHealth.Failing && diff >= c.config.LatencyDiffToUseFallback {
-		return types.ColorYellow
+	if !defaultHealth.Failing && !fallbackHealth.Failing {
+		diff := defaultHealth.MinResponseTime - fallbackHealth.MinResponseTime
+		if diff >= c.config.LatencyDiffToUseFallback {
+			return types.ColorYellow
+		}
+		return types.ColorGreen
 	}
 
-	return types.ColorGreen
+	return types.ColorRed
 }
 
 func (c *Checker) startHealthServer() {
