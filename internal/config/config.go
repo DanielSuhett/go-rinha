@@ -12,6 +12,7 @@ type Config struct {
 	RedisHost                string
 	RedisPort                int
 	RedisSocketPath          string
+	HealthSocketPath         string
 	ProcessorDefaultURL      string `validate:"required,url"`
 	ProcessorFallbackURL     string `validate:"required,url"`
 	PollingInterval          int    `validate:"required"`
@@ -28,6 +29,7 @@ func LoadConfig() (*Config, error) {
 		RedisHost:                getEnv("REDIS_HOST", "localhost"),
 		RedisPort:                getEnvAsInt("REDIS_PORT", 6380),
 		RedisSocketPath:          getEnv("REDIS_SOCKET_PATH", ""),
+		HealthSocketPath:         getEnv("HEALTH_SOCKET_PATH", "/var/run/sockets/health.sock"),
 		ProcessorDefaultURL:      getEnv("PROCESSOR_DEFAULT_URL", ""),
 		ProcessorFallbackURL:     getEnv("PROCESSOR_FALLBACK_URL", ""),
 		PollingInterval:          getEnvAsInt("POOLING_INTERVAL", 2000),

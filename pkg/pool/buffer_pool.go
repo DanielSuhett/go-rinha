@@ -11,11 +11,6 @@ var (
 		},
 	}
 
-	ResponseBufferPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 0, 512)
-		},
-	}
 )
 
 func GetByteBuffer() []byte {
@@ -29,13 +24,3 @@ func PutByteBuffer(buf []byte) {
 	ByteBufferPool.Put(buf)
 }
 
-func GetResponseBuffer() []byte {
-	return ResponseBufferPool.Get().([]byte)[:0]
-}
-
-func PutResponseBuffer(buf []byte) {
-	if cap(buf) > 8192 {
-		return
-	}
-	ResponseBufferPool.Put(buf)
-}

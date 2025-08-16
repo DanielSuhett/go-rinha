@@ -8,22 +8,26 @@ import (
 	"go-rinha/internal/types"
 	redisClient "go-rinha/pkg/redis"
 	"log"
+	"net"
+	"os"
+	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 type Checker struct {
-	httpClient     *client.HTTPClient
-	redisClient    *redisClient.Client
-	config         *config.Config
-	currentColor   atomic.Value
-	ctx            context.Context
-	cancel         context.CancelFunc
-	recoveryTicker *time.Ticker
-	pubSub         *redis.PubSub
-	lastPublished  atomic.Value
+	httpClient       *client.HTTPClient
+	redisClient      *redisClient.Client
+	config           *config.Config
+	currentColor     atomic.Value
+	ctx              context.Context
+	cancel           context.CancelFunc
+	recoveryTicker   *time.Ticker
+	lastPublished    atomic.Value
+	healthListener   net.Listener
+	healthConnection net.Conn
+	clients          map[net.Conn]bool
+	clientsMutex     sync.RWMutex
 }
 
 func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, config *config.Config) *Checker {
@@ -35,6 +39,7 @@ func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, 
 		config:      config,
 		ctx:         ctx,
 		cancel:      cancel,
+		clients:     make(map[net.Conn]bool),
 	}
 
 	checker.currentColor.Store(types.ColorGreen)
@@ -44,8 +49,10 @@ func NewChecker(httpClient *client.HTTPClient, redisClient *redisClient.Client, 
 }
 
 func (c *Checker) Start() {
-	if !c.config.IsMaster() {
-		go c.subscribeToColorChanges()
+	if c.config.IsMaster() {
+		go c.startHealthServer()
+	} else {
+		go c.connectToHealthServer()
 	}
 }
 
@@ -53,8 +60,11 @@ func (c *Checker) Stop() {
 	if c.recoveryTicker != nil {
 		c.recoveryTicker.Stop()
 	}
-	if c.pubSub != nil {
-		c.pubSub.Close()
+	if c.healthListener != nil {
+		c.healthListener.Close()
+	}
+	if c.healthConnection != nil {
+		c.healthConnection.Close()
 	}
 	c.cancel()
 }
@@ -80,7 +90,7 @@ func (c *Checker) setColor(color types.CircuitBreakerColor) {
 		log.Printf("Circuit breaker color changed from %s to %s", currentColor, color)
 		c.currentColor.Store(color)
 		if c.config.IsMaster() {
-			c.publishColorChange(color)
+			c.sendColorChange(color)
 			if currentColor == types.ColorRed && color != types.ColorRed {
 				c.recoveryTicker.Stop()
 				c.recoveryTicker = nil
@@ -150,7 +160,7 @@ func (c *Checker) checkHealth(processor types.Processor) *types.ProcessorHealth 
 	}
 
 	timeout := time.Duration(c.config.HealthTimeout) * time.Millisecond
-	statusCode, body, duration, err := c.httpClient.GetHealth(url, timeout)
+	statusCode, body, err := c.httpClient.GetHealth(url, timeout)
 	if err != nil {
 		return &types.ProcessorHealth{MinResponseTime: 0, Failing: true}
 	}
@@ -166,10 +176,7 @@ func (c *Checker) checkHealth(processor types.Processor) *types.ProcessorHealth 
 
 	var health types.ProcessorHealth
 	if err := json.Unmarshal(body, &health); err != nil {
-		return &types.ProcessorHealth{
-			MinResponseTime: int(duration.Milliseconds()),
-			Failing:         false,
-		}
+		return &types.ProcessorHealth{MinResponseTime: 0, Failing: true}
 	}
 
 	return &health
@@ -200,37 +207,162 @@ func (c *Checker) calculateColor(processors map[types.Processor]*types.Processor
 	return types.ColorGreen
 }
 
-func (c *Checker) subscribeToColorChanges() {
-	c.pubSub = c.redisClient.Subscribe(c.ctx, types.ChannelCircuitColor)
-	defer c.pubSub.Close()
+func (c *Checker) startHealthServer() {
+	os.Remove(c.config.HealthSocketPath)
 
-	ch := c.pubSub.Channel()
+	listener, err := net.Listen("unix", c.config.HealthSocketPath)
+	if err != nil {
+		log.Printf("Failed to create health socket: %v", err)
+		return
+	}
+	c.healthListener = listener
+
+	if err := os.Chmod(c.config.HealthSocketPath, 0666); err != nil {
+		log.Printf("Failed to set health socket permissions: %v", err)
+	}
+
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
-		case msg := <-ch:
-			if msg == nil {
+		default:
+			conn, err := listener.Accept()
+			if err != nil {
+				if c.ctx.Err() != nil {
+					return
+				}
+				log.Printf("Failed to accept health connection: %v", err)
 				continue
 			}
-
-			color := types.CircuitBreakerColor(msg.Payload)
-			log.Printf("Received color change: %s", color)
-			c.currentColor.Store(color)
+			go c.handleHealthConnection(conn)
 		}
 	}
 }
 
-func (c *Checker) publishColorChange(color types.CircuitBreakerColor) {
+func (c *Checker) handleHealthConnection(conn net.Conn) {
+	defer func() {
+		conn.Close()
+		c.clientsMutex.Lock()
+		delete(c.clients, conn)
+		c.clientsMutex.Unlock()
+	}()
+
+	c.clientsMutex.Lock()
+	c.clients[conn] = true
+	c.clientsMutex.Unlock()
+
+	currentColor := c.GetCurrentColor()
+	colorBytes := []byte(string(currentColor) + "\n")
+
+	if _, err := conn.Write(colorBytes); err != nil {
+		log.Printf("Failed to send initial color: %v", err)
+		return
+	}
+
+	buffer := make([]byte, 1)
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, err := conn.Read(buffer); err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				return
+			}
+		}
+	}
+}
+
+func (c *Checker) connectToHealthServer() {
+	retryDelay := time.Second
+	maxRetryDelay := 30 * time.Second
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			conn, err := net.Dial("unix", c.config.HealthSocketPath)
+			if err != nil {
+				log.Printf("Failed to connect to health server, retrying in %v: %v", retryDelay, err)
+				time.Sleep(retryDelay)
+				if retryDelay < maxRetryDelay {
+					retryDelay *= 2
+				}
+				continue
+			}
+
+			retryDelay = time.Second
+			c.healthConnection = conn
+			c.receiveColorChanges(conn)
+
+			if c.healthConnection != nil {
+				c.healthConnection.Close()
+				c.healthConnection = nil
+			}
+
+			log.Printf("Health server connection lost, reconnecting...")
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+func (c *Checker) receiveColorChanges(conn net.Conn) {
+	buffer := make([]byte, 32)
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			n, err := conn.Read(buffer)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				return
+			}
+
+			if n > 0 {
+				colorStr := string(buffer[:n-1])
+				color := types.CircuitBreakerColor(colorStr)
+				currentColor := c.GetCurrentColor()
+
+				if currentColor != color {
+					log.Printf("Received color change: %s -> %s", currentColor, color)
+					c.currentColor.Store(color)
+				}
+			}
+		}
+	}
+}
+
+func (c *Checker) sendColorChange(color types.CircuitBreakerColor) {
 	lastPublished := c.lastPublished.Load().(types.CircuitBreakerColor)
 	if lastPublished == color {
 		return
 	}
 
-	if err := c.redisClient.Publish(c.ctx, types.ChannelCircuitColor, string(color)); err != nil {
-		log.Printf("Failed to publish color change: %v", err)
-		return
+	c.clientsMutex.Lock()
+	colorBytes := []byte(string(color) + "\n")
+	var failedConns []net.Conn
+
+	for conn := range c.clients {
+		if _, err := conn.Write(colorBytes); err != nil {
+			log.Printf("Client disconnected, removing from clients: %v", err)
+			failedConns = append(failedConns, conn)
+		}
 	}
+
+	for _, conn := range failedConns {
+		delete(c.clients, conn)
+		conn.Close()
+	}
+	c.clientsMutex.Unlock()
 
 	c.lastPublished.Store(color)
 }

@@ -1,79 +1,109 @@
 package client
 
 import (
-	"bytes"
 	"fmt"
-	"io"
-	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
 type HTTPClient struct {
-	client *http.Client
+	clients map[string]*fasthttp.HostClient
 }
 
 func NewHTTPClient() *HTTPClient {
-	transport := &http.Transport{
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   50,
-		MaxConnsPerHost:       100,
-		IdleConnTimeout:       60 * time.Second,
-		TLSHandshakeTimeout:   2 * time.Second,
-		ResponseHeaderTimeout: 2 * time.Second,
-		DisableKeepAlives:     false,
-		DisableCompression:    true,
-		ForceAttemptHTTP2:     false,
-	}
-
 	return &HTTPClient{
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   1 * time.Second,
-		},
+		clients: make(map[string]*fasthttp.HostClient),
 	}
 }
 
-func (h *HTTPClient) PostPayment(url string, jsonData []byte) (int, error) {
-	resp, err := h.client.Post(url, "application/json", bytes.NewReader(jsonData))
+func (h *HTTPClient) getOrCreateClient(targetURL string) *fasthttp.HostClient {
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil
+	}
+	
+	host := parsedURL.Host
+	if client, exists := h.clients[host]; exists {
+		return client
+	}
+
+	client := &fasthttp.HostClient{
+		Addr:                          host,
+		MaxConns:                      50,
+		MaxIdleConnDuration:           30 * time.Second,
+		MaxConnDuration:               0,
+		MaxIdemponentCallAttempts:     1,
+		ReadTimeout:                   1 * time.Second,
+		WriteTimeout:                  1 * time.Second,
+		MaxResponseBodySize:           4096,
+		DisableHeaderNamesNormalizing: true,
+		DisablePathNormalizing:        true,
+		NoDefaultUserAgentHeader:      true,
+	}
+
+	h.clients[host] = client
+	return client
+}
+
+func (h *HTTPClient) PostPayment(targetURL string, jsonData []byte) (int, error) {
+	client := h.getOrCreateClient(targetURL)
+	if client == nil {
+		return 0, fmt.Errorf("invalid URL: %s", targetURL)
+	}
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	parsedURL, _ := url.Parse(targetURL)
+	req.SetRequestURI(parsedURL.Path)
+	req.Header.SetMethod("POST")
+	req.Header.SetContentType("application/json")
+	req.Header.SetHost(parsedURL.Host)
+	req.SetBody(jsonData)
+
+	err := client.Do(req, resp)
 	if err != nil {
 		return 0, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	_, err = io.ReadAll(resp.Body)
-	if err != nil {
-		io.Copy(io.Discard, resp.Body)
-		return resp.StatusCode, nil
-	}
-	return resp.StatusCode, nil
+	return resp.StatusCode(), nil
 }
 
-func (h *HTTPClient) GetHealth(url string, timeout time.Duration) (int, []byte, time.Duration, error) {
-	oldTimeout := h.client.Timeout
-	h.client.Timeout = timeout
-	defer func() {
-		h.client.Timeout = oldTimeout
-	}()
-
-	start := time.Now()
-	resp, err := h.client.Get(url)
-	duration := time.Since(start)
-
-	if err != nil {
-		return 0, nil, duration, fmt.Errorf("health check failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return resp.StatusCode, nil, duration, fmt.Errorf("failed to read response body: %w", err)
+func (h *HTTPClient) GetHealth(targetURL string, timeout time.Duration) (int, []byte, error) {
+	client := h.getOrCreateClient(targetURL)
+	if client == nil {
+		return 0, nil, fmt.Errorf("invalid URL: %s", targetURL)
 	}
 
-	return resp.StatusCode, body, duration, nil
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+	
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	parsedURL, _ := url.Parse(targetURL)
+	req.SetRequestURI(parsedURL.Path)
+	req.Header.SetMethod("GET")
+	req.Header.SetHost(parsedURL.Host)
+
+	err := client.DoTimeout(req, resp, timeout)
+	if err != nil {
+		return 0, nil, fmt.Errorf("health check failed: %w", err)
+	}
+
+	body := make([]byte, len(resp.Body()))
+	copy(body, resp.Body())
+
+	return resp.StatusCode(), body, nil
 }
 
 func (h *HTTPClient) Close() {
-	if transport, ok := h.client.Transport.(*http.Transport); ok {
-		transport.CloseIdleConnections()
+	for _, client := range h.clients {
+		client.CloseIdleConnections()
 	}
 }

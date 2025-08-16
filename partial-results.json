@@ -1,12 +1,12 @@
 {
   "participante": "anonymous",
-  "total_liquido": 380171.988,
+  "total_liquido": 383340.0879,
   "total_bruto": 333484.2,
   "total_taxas": 16674.21,
   "descricao": "'total_liquido' é sua pontuação final. Equivale ao seu lucro. Fórmula: total_liquido + (total_liquido * p99.bonus) - (total_liquido * multa.porcentagem)",
   "p99": {
-    "valor": "0.85ms",
-    "bonus": "20%",
+    "valor": "0.45ms",
+    "bonus": "21%",
     "max_requests": "550",
     "descricao": "Fórmula para o bônus: max((11 - p99.valor) * 0.02, 0)"
   },

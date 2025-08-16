@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"go-rinha/internal/client"
 	"go-rinha/internal/config"
@@ -17,6 +16,7 @@ import (
 	"go-rinha/internal/service"
 	"go-rinha/pkg/health"
 	"go-rinha/pkg/redis"
+	"go-rinha/pkg/utils"
 
 	"github.com/bytedance/sonic"
 	"github.com/valyala/fasthttp"
@@ -26,7 +26,6 @@ type FastHTTPServer struct {
 	paymentService *service.PaymentService
 	queueService   *service.QueueService
 	config         *config.Config
-	bodyPool       chan []byte
 }
 
 func main() {
@@ -61,6 +60,7 @@ func main() {
 
 	os.Remove(socketPath)
 	os.MkdirAll("/var/run/sockets", 0755)
+	os.MkdirAll("/var/run/health", 0755)
 
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -106,10 +106,6 @@ func main() {
 	redisClient.Close()
 }
 
-func UnsafeString(b []byte) string {
-	// #nosec G103
-	return *(*string)(unsafe.Pointer(&b))
-}
 
 func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 	start := time.Now()
@@ -120,7 +116,7 @@ func (s *FastHTTPServer) handler(ctx *fasthttp.RequestCtx) {
 		}
 	}()
 
-	path := UnsafeString(ctx.Path())
+	path := utils.UnsafeString(ctx.Path())
 
 	if path == "/payments" {
 		body := ctx.Request.SwapBody(nil)
